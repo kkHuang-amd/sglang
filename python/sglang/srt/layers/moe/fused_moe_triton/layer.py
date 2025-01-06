@@ -18,7 +18,11 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from sglang.srt.utils import set_weight_attrs
+
+from sglang.srt.utils import (
+    is_hip,
+    set_weight_attrs,
+)
 
 if torch.cuda.is_available():
     from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
@@ -96,6 +100,32 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+
+    def permute_weight(x: torch.Tensor) -> torch.Tensor:
+        int b_ = x.shape[0];
+        int n_ = x.shape[1];
+        int k_ = x.shape[2];
+
+        x_ = x
+        if envs.VLLM_MOE_SHUFFLE:
+            x_ = x_.view(b_, n_ / 16, 16, k_ / 32, 4, 8)
+            x_ = x_.permute(0, 1, 3, 4, 2, 5)
+            x_ = x_.contiguous()
+        return x_ 
+
+    def process_weights_after_loading(self):
+        if is_hip() and bool(int(os.getenv("CK_MOE", "0"))):
+            self.w13_weight = torch.nn.Parameter(
+                permute_weight(layer.w13_weight.data),
+                requires_grad=False,
+            )
+            torch.cuda.empty_cache()
+            self.w2_weight = torch.nn.Parameter(
+                permute_weight(layer.w2_weight.data),
+                requires_grad=False,
+            )
+            torch.cuda.empty_cache()
+        return
 
     def apply(
         self,
