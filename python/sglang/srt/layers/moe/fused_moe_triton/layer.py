@@ -180,14 +180,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             correction_bias=correction_bias,
         )
 
-        return fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-        )
+        if is_hip() and bool(int(os.getenv("CK_MOE", "0"))):
+            from sglang.srt.layers.moe.fused_moe_ck.fused_moe import fused_experts_ck
+            return fused_experts_ck(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+            )
+        else:
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+            )
 
     def forward_cpu(self, *args, **kwargs):
         raise NotImplementedError("The CPU backend currently does not support MoE.")

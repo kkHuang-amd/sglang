@@ -788,28 +788,49 @@ class Fp8MoEMethod:
             correction_bias=correction_bias,
         )
 
-        # Expert fusion with FP8 quantization
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            use_fp8_w8a8=True,
-            w1_scale=(
-                layer.w13_weight_scale_inv
-                if self.block_quant
-                else layer.w13_weight_scale
-            ),
-            w2_scale=(
-                layer.w2_weight_scale_inv if self.block_quant else layer.w2_weight_scale
-            ),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            block_shape=self.quant_config.weight_block_size,
-        )
-
+        if is_hip() and bool(int(os.getenv("CK_MOE", "0"))):
+            from sglang.srt.layers.moe.fused_moe_ck.fused_moe import fused_experts_ck
+            fused_experts_ck(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                use_fp8_w8a8=True,
+                w1_scale=(
+                    layer.w13_weight_scale_inv
+                    if self.block_quant
+                    else layer.w13_weight_scale
+                ),
+                w2_scale=(
+                    layer.w2_weight_scale_inv if self.block_quant else layer.w2_weight_scale
+                ),
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+            )
+        
+        else:
+            # Expert fusion with FP8 quantization
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                use_fp8_w8a8=True,
+                w1_scale=(
+                    layer.w13_weight_scale_inv
+                    if self.block_quant
+                    else layer.w13_weight_scale
+                ),
+                w2_scale=(
+                    layer.w2_weight_scale_inv if self.block_quant else layer.w2_weight_scale
+                ),
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                block_shape=self.quant_config.weight_block_size,
+            )
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """
