@@ -41,32 +41,32 @@ void moe_fused_experts(torch::Tensor hidden_states, torch::Tensor w1, torch::Ten
                           torch::Tensor a1_scale, torch::Tensor a2_scale,
                           torch::Tensor sorted_ids, torch::Tensor sorted_weights,
                           torch::Tensor sorted_expert_ids, torch::Tensor num_tokens_post_pad,
-                          torch::Tensor out, int64_t block_m, int fused_qunt, int gate_only) {
+                          torch::Tensor out, int block_m, int fused_quant, int gate_only) {
 
     auto prec_i = torchDTypeToStr(hidden_states.dtype());
     auto prec_w = torchDTypeToStr(w1.dtype());
     auto prec_o = torchDTypeToStr(out.dtype());
     auto prec_kw = torchDTypeToStr(topk_weights.dtype());
 
-    auto prec_st = "fp32"
-    auto prec_sw = "fp32"
-    auto prec_sq = "fp32"
-    
-    if (fused_qunt != 0) {
+    std::string prec_st = "fp32";
+    std::string prec_sw = "fp32";
+    std::string prec_sq = "fp32";
+
+    if (fused_quant != 0) {
         prec_st = torchDTypeToStr(a1_scale.dtype());
-	prec_sw = torchDTypeToStr(w1_scale.dtype())
-	prec_sq = torchDTypeToStr(a2_scale.dtype())
+	prec_sw = torchDTypeToStr(w1_scale.dtype());
+	prec_sq = torchDTypeToStr(a2_scale.dtype());
     }
 
-    auto hidden_size = w1.size(2);
-    auto shared_intermediate_size_0 = w1.size(1);
+    int hidden_size = w1.size(2);
+    int shared_intermediate_size_0 = w1.size(1);
 
-    auto tokens = hidden_states.size(0);
-    auto experts = w1.size(0);
+    int tokens = hidden_states.size(0);
+    int experts = w1.size(0);
 
-    auto topk = topk_ids_host.size(1);
+    int topk = topk_ids.size(1);
 
-    auto stride = hidden_size;
+    int stride = hidden_size;
 
     fused_moe_traits traits{prec_i,
                                 prec_w,

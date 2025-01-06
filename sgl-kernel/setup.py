@@ -144,6 +144,7 @@ else:
                 "-fPIC",
                 "-DUSE_PROF_API=1",
                 "-DENABLE_FP8",
+                "-DUSE_ROCM",
                 "-D__HIP_PLATFORM_HCC__=1",
                 "-D__HIP_PLATFORM_AMD__=1",
                 "-U__HIP_NO_HALF_CONVERSIONS__",
@@ -164,7 +165,9 @@ else:
         f"{ck_dir}/example/ck_tile/15_fused_moe/instances",
     ], bd_dir)
 
-    build_srcs = ["src/sgl-kernel/csrc/moe_align_kernel.cu"]
+    build_srcs = ["src/sgl-kernel/csrc/moe_align_kernel.cu",
+            "src/sgl-kernel/csrc/moe_fused_experts.cu",
+            "src/sgl-kernel/csrc/sgl_kernel_ops.cu"]
 
     ext_modules = [
         CUDAExtension(

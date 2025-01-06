@@ -1090,18 +1090,40 @@ def fused_moe(
         custom_routing_function=custom_routing_function,
     )
 
-    return fused_experts(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        inplace=inplace,
-        use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
-        block_shape=block_shape,
-    )
+    if is_hip_flag and bool(int(os.getenv("CK_MOE", "0"))):
+        from sgl_kernel import moe_fused_experts as sgl_moe_fused_experts
+
+        print("use ck moe", flush=True)
+        block_m = 32
+        tokens = hidden_states.shape[0]
+        experts = w1.shape[0]
+
+        out_hidden_states = torch.empty_like(hidden_states)
+        max_num_tokens_padded = topk * tokens + experts * block_m - topk
+
+        sorted_token_ids = torch.empty(
+            (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+        )
+        sorted_weight = torch.empty(
+            (max_num_tokens_padded,), dtype=topk_weights.dtype, device=topk_ids.device
+        )
+        sorted_expert_ids = torch.empty(
+            ((max_num_tokens_padded + block_m - 1) / block_m,), dtype=torch.int32, device=topk_ids.device
+        )
+        num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    else:
+        return fused_experts(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            inplace=inplace,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_shape,
+        )

@@ -13,19 +13,23 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts, int64_t b
                           torch::Tensor token_cnts_buffer, torch::Tensor cumsum_buffer);
 
 void moe_fused_experts(torch::Tensor hidden_states, torch::Tensor w1, torch::Tensor w2,
-		          torch::Tensor topk_weights, torch::Tensor topk_ids,
-			  torch::Tensor w1_scale, torch::Tensor w2_scale,
-			  torch::Tensor a1_scale, torch::Tensor a2_scale,
+                          torch::Tensor topk_weights, torch::Tensor topk_ids,
+                          torch::Tensor w1_scale, torch::Tensor w2_scale,
+                          torch::Tensor a1_scale, torch::Tensor a2_scale,
                           torch::Tensor sorted_ids, torch::Tensor sorted_weights,
-			  torch::Tensor sorted_expert_ids, torch::Tensor num_tokens_post_pad,
-			  torch::Tensor out, int64_t block_m)
+                          torch::Tensor sorted_expert_ids, torch::Tensor num_tokens_post_pad,
+                          torch::Tensor out, int block_m, int fused_quant, int gate_only);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // trt_reduce
+#if !(defined(USE_ROCM))
   m.def("init_custom_ar", &init_custom_ar, "init custom allreduce meta (CUDA)");
   m.def("dispose", &dispose, "dispose custom allreduce meta");
   m.def("all_reduce", &all_reduce, "custom all reduce (CUDA)");
   // moe_align_block_size
   m.def("moe_align_block_size", &moe_align_block_size, "MOE Align Block Size (CUDA)");
-  m.def("moe_fused_experts", &moe_fused_experts, "MOE implementation by ck")
+#else
+  m.def("moe_fused_experts", &moe_fused_experts, "MOE implementation by ck");
+#endif
+  
 }
