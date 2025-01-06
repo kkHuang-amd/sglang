@@ -433,9 +433,9 @@ class Fp8MoEMethod:
         self.block_quant = self.quant_config.weight_block_size is not None
 
     def permute_weight(x: torch.Tensor) -> torch.Tensor:
-        int b_ = x.shape[0];
-        int n_ = x.shape[1];
-        int k_ = x.shape[2];
+        b_ = x.shape[0];
+        n_ = x.shape[1];
+        k_ = x.shape[2];
         
         x_ = x
         if envs.VLLM_MOE_SHUFFLE:
