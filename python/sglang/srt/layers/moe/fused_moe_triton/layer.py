@@ -1,5 +1,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/a6221a144af772fd1a68fe7e627935dc53e81738/vllm/model_executor/layers/fused_moe/layer.py
 
+import os
+
 from abc import abstractmethod
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
@@ -102,9 +104,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
     def permute_weight(x: torch.Tensor) -> torch.Tensor:
-        int b_ = x.shape[0];
-        int n_ = x.shape[1];
-        int k_ = x.shape[2];
+        b_ = x.shape[0];
+        n_ = x.shape[1];
+        k_ = x.shape[2];
 
         x_ = x
         if envs.VLLM_MOE_SHUFFLE:
@@ -113,7 +115,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             x_ = x_.contiguous()
         return x_ 
 
-    def process_weights_after_loading(self):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_hip() and bool(int(os.getenv("CK_MOE", "0"))):
             self.w13_weight = torch.nn.Parameter(
                 permute_weight(layer.w13_weight.data),
