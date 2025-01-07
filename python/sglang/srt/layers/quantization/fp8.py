@@ -42,6 +42,7 @@ from sglang.srt.utils import (
     is_hip,
     print_warning_once,
     set_weight_attrs,
+    permute_weight,
 )
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -431,18 +432,6 @@ class Fp8MoEMethod:
     def __init__(self, quant_config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-
-    def permute_weight(x: torch.Tensor) -> torch.Tensor:
-        b_ = x.shape[0];
-        n_ = x.shape[1];
-        k_ = x.shape[2];
-        
-        x_ = x
-        if envs.VLLM_MOE_SHUFFLE:
-            x_ = x_.view(b_, n_ / 16, 16, k_ / 64, 4, 16)
-            x_ = x_.permute(0, 1, 3, 4, 2, 5)
-            x_ = x_.contiguous()
-        return x_
 
     def create_weights(
         self,

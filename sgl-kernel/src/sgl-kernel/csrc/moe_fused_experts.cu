@@ -97,6 +97,10 @@ void moe_fused_experts(torch::Tensor &hidden_states, torch::Tensor &w1, torch::T
                             topk,
                             stride};
 
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    fused_moe(traits, args, {stream}); 
+
 //    std::cout << "[moe_fused_experts] prec_i:" << prec_i
 //	      << " prec_w:" << prec_w
 //	      << " prec_o:" << prec_o

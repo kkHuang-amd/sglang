@@ -85,7 +85,7 @@ def fused_experts_ck(
         num_tokens_post_pad,
         out_hidden_states,
         32,
-        1,
+        (use_fp8_w8a8 or use_int8_w8a16),
         0)
 
     return out_hidden_states
