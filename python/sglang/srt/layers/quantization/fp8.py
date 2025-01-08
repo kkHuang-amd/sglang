@@ -779,7 +779,7 @@ class Fp8MoEMethod:
 
         if is_hip() and bool(int(os.getenv("CK_MOE", "0"))):
             from sglang.srt.layers.moe.fused_moe_ck.fused_moe import fused_experts_ck
-            fused_experts_ck(
+            return fused_experts_ck(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
