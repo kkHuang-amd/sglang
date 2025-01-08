@@ -1343,10 +1343,8 @@ def permute_weight(x: torch.Tensor) -> torch.Tensor:
 
     x_ = x
     if x.dtype == torch.bfloat16 or x.dtype == torch.float16:
-        print("shuffle for torch.bloat16", flush=True)
         x_ = x_.view(int(b_), int(n_ / 16), 16, int(k_ / 32), 4, 8)
     elif x.dtype == torch.float8_e4m3fnuz or x.dtype == torch.int8:
-        print("shuffle for torch.float8_e4m3fnuz", flush=True)
         x_ = x_.view(int(b_), int(n_ / 16), 16, int(k_ / 64), 4, 16)
     else:
        return x_
