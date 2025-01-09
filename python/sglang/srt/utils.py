@@ -1351,7 +1351,30 @@ def permute_weight(x: torch.Tensor) -> torch.Tensor:
 
     x_ = x_.permute(0, 1, 3, 4, 2, 5)
     x_ = x_.contiguous()
+    x_ = x_.view(*x.shape)
     return x_
+
+def checkAllclose(a, b, rtol=1e-2, atol=1e-2, msg=''):
+    isClose = torch.isclose(a, b, rtol=rtol, atol=atol)
+    mask = ~isClose
+    if isClose.all():
+        print(f'{msg}[checkAllclose {atol=} {rtol=} passed~]')
+    else:
+        percent = (a[mask]).numel()/a.numel()
+        delta = (a-b)[mask]
+        if percent > 0.01:
+            print(f'''{msg}[checkAllclose {atol=} {rtol=} failed!]
+        a:  {a.shape}
+            {a[mask]}
+        b:  {b.shape}
+            {b[mask]}
+    dtlta:
+            {delta}''')
+        else:
+            print(
+                f'''{msg}[checkAllclose {atol=} {rtol=} waring!] a and b results are not all close''')
+        print(
+            f'-->max delta:{delta.max()}, delta details: {percent:.1%} ({(a[mask]).numel()} of {a.numel()}) elements')
 
 class MultiprocessingSerializer:
     @staticmethod

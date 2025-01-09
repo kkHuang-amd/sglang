@@ -106,12 +106,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_hip() and bool(int(os.getenv("CK_MOE", "0"))):
-            self.w13_weight = torch.nn.Parameter(
+            layer.w13_weight = torch.nn.Parameter(
                 permute_weight(layer.w13_weight.data),
                 requires_grad=False,
             )
             torch.cuda.empty_cache()
-            self.w2_weight = torch.nn.Parameter(
+            layer.w2_weight = torch.nn.Parameter(
                 permute_weight(layer.w2_weight.data),
                 requires_grad=False,
             )
