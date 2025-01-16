@@ -208,12 +208,12 @@ def fused_moe_kernel(
         else:
             a_scale = tl.load(a_scale_ptr)
             b_scale = tl.load(b_scale_ptr + off_experts)
-    if use_int4_w4:
+    if use_int4_w:
         #load b int4 scale
         b_scale_int4_ptrs = (
                     b_scale_ptr + off_experts * stride_bsie + offs_bn[None, :] * stride_bsin
         )
-        b_scale_int4 = tl.load(b_scale_int4_ptr)
+        b_scale_int4 = tl.load(b_scale_int4_ptrs)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -238,7 +238,7 @@ def fused_moe_kernel(
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                 other=0.0,
             )
-            if use_int4_w4:
+            if use_int4_w:
                 #size (BLOCK_SIZE_K /8, BLOCK_SIZE_N)
                 b_int4 = tl.load(b_ptrs, mask=offs_k[:, None] < (K - k)*BLOCK_SIZE_K/8, other=0.0) 
                 b = int4_to_fp8_dequant(b_int4, b_scale_int4, b_int4.shape[0], b_int4.shape[1])
@@ -264,7 +264,7 @@ def fused_moe_kernel(
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        if use_int4_w4:
+        if use_int4_w:
             b_ptrs += BLOCK_SIZE_K/8 * stride_bk
         else:
             b_ptrs += BLOCK_SIZE_K * stride_bk
