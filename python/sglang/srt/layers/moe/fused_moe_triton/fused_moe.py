@@ -58,7 +58,8 @@ def int4_to_fp8_dequant(
     # Unpack and reorder: shift out the correct 4-bit value and mask.
     weights = (weights >> shifts) & 0xF #(K,N)
 
-    scales = tl.broadcast_to(scales[None, :], (K8*8,N))
+    #scales = tl.broadcast_to(scales[None, :], (K8*8,N))
+    scales = tl.broadcast_to(scales[:], (K8*8,N))
     #tl.device_print("scales", scales)
     dweights = weights * scales
     dweights = dweights.to(tl.float8e4b8)
@@ -231,7 +232,13 @@ def fused_moe_kernel(
                 mask=token_mask[:, None],
                 other=0.0,
             )
-            b = tl.load(b_ptrs)
+            #b = tl.load(b_ptrs)
+            if use_int4_w:
+                #size (BLOCK_SIZE_K /8, BLOCK_SIZE_N)
+                b_int4 = tl.load(b_ptrs) 
+                b = int4_to_fp8_dequant(b_int4, b_scale_int4, b_int4.shape[0], b_int4.shape[1])
+            else:
+                b = tl.load(b_ptrs)
         else:
             a = tl.load(
                 a_ptrs,
@@ -265,7 +272,7 @@ def fused_moe_kernel(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         if use_int4_w:
-            b_ptrs += BLOCK_SIZE_K/8 * stride_bk
+            b_ptrs += BLOCK_SIZE_K//8 * stride_bk
         else:
             b_ptrs += BLOCK_SIZE_K * stride_bk
 
@@ -563,11 +570,10 @@ def invoke_fused_moe_kernel(
     )
 
     K = (B.shape[2] - padded_size)*8
-    #if K % config["BLOCK_SIZE_K"] == 0:
-    #    even_Ks = True
-    #else:
-    #    even_Ks = False
-    even_Ks = False
+    if K % config["BLOCK_SIZE_K"] == 0:
+        even_Ks = True
+    else:
+        even_Ks = False
 
     #TODO: Have these passed to this function. Just dummies for now
     #use_int4_w = False
