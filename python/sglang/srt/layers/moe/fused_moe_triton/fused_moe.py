@@ -32,6 +32,39 @@ enable_moe_align_block_size_triton = bool(
     int(os.getenv("ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
 )
 
+@triton.jit
+def int4_to_fp8_dequant(
+        qweights,  # quantized matrix, K/8 x N
+        scales,  # scales, per channel (N,)
+        K8: tl.constexpr, #K/8
+        N: tl.constexpr
+):
+    #tl.device_print("in_qweights", qweights)
+    qweights = qweights.trans(1,0) #(N,K8)
+    qweights = tl.interleave(qweights, qweights) 
+    qweights = tl.interleave(qweights, qweights)
+    weights = tl.interleave(qweights, qweights).trans(1,0) #(K,N)
+
+    reverse_order_tensor = ((tl.arange(0, 2) * 4)[None, :] +
+                                tl.arange(0, 4)[:, None]).reshape(8)
+    
+    # Use this to compute a set of shifts that can be used to unpack and
+    # reorder the values in weights
+    shifts = reverse_order_tensor * 4
+    shifts = tl.broadcast_to(shifts[None, :], (K8*N, 8)) #(K8*N,8)
+    shifts = tl.reshape(shifts, (N, K8*8)).trans(1,0) #(K,N)
+    #tl.device_print("shifts", shifts)
+
+    # Unpack and reorder: shift out the correct 4-bit value and mask.
+    weights = (weights >> shifts) & 0xF #(K,N)
+
+    scales = tl.broadcast_to(scales[None, :], (K8*8,N))
+    #tl.device_print("scales", scales)
+    dweights = weights * scales
+    dweights = dweights.to(tl.float8e4b8)
+    #tl.device_print("dweights", dweights)
+
+    return dweights
 
 @triton.jit
 def fused_moe_kernel(
@@ -41,6 +74,7 @@ def fused_moe_kernel(
     c_ptr,
     a_scale_ptr,
     b_scale_ptr,
+    b_scale_int4_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
     expert_ids_ptr,
@@ -66,6 +100,8 @@ def fused_moe_kernel(
     stride_bse,
     stride_bsk,
     stride_bsn,
+    stride_bsie,
+    stride_bsin,
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -80,6 +116,7 @@ def fused_moe_kernel(
     use_fp8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
     even_Ks: tl.constexpr,
+    use_int4_w: tl.constexpr = 0,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -135,16 +172,26 @@ def fused_moe_kernel(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_k_8 = tl.arange(0, BLOCK_SIZE_K // 8)
     a_ptrs = a_ptr + (
         offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
     )
 
     off_experts = tl.load(expert_ids_ptr + pid_m)
-    b_ptrs = (
-        b_ptr
-        + off_experts * stride_be
-        + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    )
+    if use_int4_w:
+        #load 1/8 th elements in B in the K direction 
+        b_ptrs = (
+            b_ptr
+            + off_experts * stride_be
+            + (offs_k_8[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+        )
+    else:
+        #load regular
+        b_ptrs = (
+            b_ptr
+            + off_experts * stride_be
+            + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+        )
     if use_int8_w8a16:
         b_scale_ptrs = (
             b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
@@ -161,6 +208,12 @@ def fused_moe_kernel(
         else:
             a_scale = tl.load(a_scale_ptr)
             b_scale = tl.load(b_scale_ptr + off_experts)
+    if use_int4_w4:
+        #load b int4 scale
+        b_scale_int4_ptrs = (
+                    b_scale_ptr + off_experts * stride_bsie + offs_bn[None, :] * stride_bsin
+        )
+        b_scale_int4 = tl.load(b_scale_int4_ptr)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -185,7 +238,12 @@ def fused_moe_kernel(
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                 other=0.0,
             )
-            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+            if use_int4_w4:
+                #size (BLOCK_SIZE_K /8, BLOCK_SIZE_N)
+                b_int4 = tl.load(b_ptrs, mask=offs_k[:, None] < (K - k)*BLOCK_SIZE_K/8, other=0.0) 
+                b = int4_to_fp8_dequant(b_int4, b_scale_int4, b_int4.shape[0], b_int4.shape[1])
+            else:
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
         # We accumulate along the K dimension.
         if use_int8_w8a16:
@@ -206,7 +264,11 @@ def fused_moe_kernel(
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        if use_int4_w4:
+            b_ptrs += BLOCK_SIZE_K/8 * stride_bk
+        else:
+            b_ptrs += BLOCK_SIZE_K * stride_bk
+
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
@@ -459,6 +521,7 @@ def invoke_fused_moe_kernel(
     C: torch.Tensor,
     A_scale: Optional[torch.Tensor],
     B_scale: Optional[torch.Tensor],
+    B_scale_int4: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     sorted_token_ids: torch.Tensor,
@@ -499,11 +562,19 @@ def invoke_fused_moe_kernel(
         * triton.cdiv(B.shape[1], META["BLOCK_SIZE_N"]),
     )
 
-    K = B.shape[2] - padded_size
-    if K % config["BLOCK_SIZE_K"] == 0:
-        even_Ks = True
-    else:
-        even_Ks = False
+    K = (B.shape[2] - padded_size)*8
+    #if K % config["BLOCK_SIZE_K"] == 0:
+    #    even_Ks = True
+    #else:
+    #    even_Ks = False
+    even_Ks = False
+
+    #TODO: Have these passed to this function. Just dummies for now
+    #use_int4_w = False
+    #B_scale_int4 = torch.zeros((B.shape[1], B.shape[2])) # (E,N)
+
+    if B_scale_int4 is not None:
+        use_int4_w = True
 
     fused_moe_kernel[grid](
         A,
@@ -511,12 +582,13 @@ def invoke_fused_moe_kernel(
         C,
         A_scale,
         B_scale,
+        B_scale_int4,
         topk_weights,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
         B.shape[1],
-        B.shape[2] - padded_size,
+        (B.shape[2] - padded_size)*8,
         sorted_token_ids.shape[0],
         topk_ids.numel(),
         A.stride(0),
@@ -531,6 +603,8 @@ def invoke_fused_moe_kernel(
         B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
         B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale_int4.stride(0) if B_scale_int4 is not None and B_scale_int4.ndim == 2 else 0,
+        B_scale_int4.stride(1) if B_scale_int4 is not None and B_scale_int4.ndim == 2 else 0,
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         MUL_ROUTED_WEIGHT=mul_routed_weight,
@@ -539,6 +613,7 @@ def invoke_fused_moe_kernel(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         even_Ks=even_Ks,
+        use_int4_w=use_int4_w, 
         **config,
     )
 
@@ -715,6 +790,8 @@ def inplace_fused_experts(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+    w1_scale1: Optional[torch.Tensor] = None,
+    w2_scale1: Optional[torch.Tensor] = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -730,6 +807,8 @@ def inplace_fused_experts(
         a1_scale,
         a2_scale,
         block_shape,
+        w1_scale1,
+        w2_scale1,
     )
 
 
@@ -746,6 +825,8 @@ def inplace_fused_experts_fake(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+    w1_scale1: Optional[torch.Tensor] = None,
+    w2_scale1: Optional[torch.Tensor] = None,
 ) -> None:
     pass
 
@@ -771,6 +852,8 @@ def outplace_fused_experts(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+    w1_scale1: Optional[torch.Tensor] = None,
+    w2_scale1: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -786,6 +869,8 @@ def outplace_fused_experts(
         a1_scale,
         a2_scale,
         block_shape,
+        w1_scale1,
+        w2_scale1,
     )
 
 
@@ -802,6 +887,8 @@ def outplace_fused_experts_fake(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+    w1_scale1: Optional[torch.Tensor] = None,
+    w2_scale1: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -828,6 +915,8 @@ def fused_experts(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+    w1_scale1: Optional[torch.Tensor] = None,
+    w2_scale1: Optional[torch.Tensor] = None,
 ):
     if inplace:
         torch.ops.sglang.inplace_fused_experts(
@@ -843,6 +932,8 @@ def fused_experts(
             a1_scale,
             a2_scale,
             block_shape,
+            w1_scale1,
+            w2_scale1,
         )
         return hidden_states
     else:
@@ -859,6 +950,8 @@ def fused_experts(
             a1_scale,
             a2_scale,
             block_shape,
+            w1_scale1,
+            w2_scale1,
         )
 
 
@@ -876,13 +969,15 @@ def fused_experts_impl(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+    w1_scale1: Optional[torch.Tensor] = None,
+    w2_scale1: Optional[torch.Tensor] = None,
 ):
     padded_size = padding_size
     if not use_fp8_w8a8 or block_shape is not None:
         padded_size = 0
 
     # Check constraints.
-    assert hidden_states.shape[1] == w1.shape[2] - padded_size, "Hidden size mismatch"
+    assert hidden_states.shape[1] == ((w1.shape[2] - padded_size)*8), "Hidden size mismatch"
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
@@ -904,7 +999,7 @@ def fused_experts_impl(
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
         w1.shape,
-        (w2.shape[0], w2.shape[1], w2.shape[2] - padded_size),
+        (w2.shape[0], w2.shape[1], (w2.shape[2] - padded_size)*8 ),
         topk_ids.shape[1],
         config_dtype,
         block_shape=block_shape,
@@ -969,6 +1064,7 @@ def fused_experts_impl(
             intermediate_cache1,
             a1_scale,
             w1_scale,
+            w1_scale1,
             curr_topk_weights,
             curr_topk_ids,
             sorted_token_ids,
@@ -991,6 +1087,7 @@ def fused_experts_impl(
             intermediate_cache3,
             a2_scale,
             w2_scale,
+            w2_scale1,
             curr_topk_weights,
             curr_topk_ids,
             sorted_token_ids,
