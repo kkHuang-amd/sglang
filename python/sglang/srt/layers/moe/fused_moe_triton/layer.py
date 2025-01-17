@@ -473,9 +473,7 @@ class FusedMoE(torch.nn.Module):
             # specific to each case
             quant_method = getattr(param, "quant_method", None)
             if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
-                scaled_factor = 2
-                if "scale1" in weight_name:
-                    scaled_factor = 0.5
+                scaled_factor = 0.5
 
                 loaded_weight = loaded_weight * scaled_factor
                 self._load_per_channel_weight_scale(
@@ -497,6 +495,9 @@ class FusedMoE(torch.nn.Module):
                     tp_rank=tp_rank,
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
+                scaled_factor = 2
+                loaded_weight = loaded_weight * scaled_factor
+
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
