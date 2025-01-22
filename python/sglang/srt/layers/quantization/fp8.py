@@ -545,7 +545,7 @@ class Fp8MoEMethod:
             layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
             if get_bool_env_var("USE_INT4_WEIGHT"):
-                 w13_weight_scale1 = torch.nn.Parameter(
+                w13_weight_scale1 = torch.nn.Parameter(
                     torch.ones(num_experts, 2*intermediate_size, dtype=torch.float32), requires_grad=False
                 )
                 w2_weight_scale1 = torch.nn.Parameter(
