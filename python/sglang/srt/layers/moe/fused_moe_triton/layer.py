@@ -487,6 +487,9 @@ class FusedMoE(torch.nn.Module):
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
+            if get_bool_env_var("USE_INT4_WEIGHT"):
+                loaded_weight = loaded_weight * 2
+
             loaded_weight = loaded_weight.to(param.data.device)
 
             if (
@@ -524,6 +527,8 @@ class FusedMoE(torch.nn.Module):
             # specific to each case
             quant_method = getattr(param, "quant_method", None)
             if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
+                if get_bool_env_var("USE_INT4_WEIGHT"):
+                    loaded_weight = loaded_weight * 0.5
                 self._load_per_channel_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -543,6 +548,8 @@ class FusedMoE(torch.nn.Module):
                     tp_rank=tp_rank,
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
+                if get_bool_env_var("USE_INT4_WEIGHT"):
+                    loaded_weight = loaded_weight * 2
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
