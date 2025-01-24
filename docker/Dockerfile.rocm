@@ -17,6 +17,7 @@ ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
 ARG TRITON_COMMIT="845d75a"
 
 
+# TODO (INT4-FP8)
 ARG ATER_REPO="https://github.com/HaiShaw/ater"
 ARG CK_COMMITS="fa05ae"
 

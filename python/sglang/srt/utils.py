@@ -1303,7 +1303,7 @@ def parse_tool_response(text, tools, **kwargs):
     ]
     return text, call_info_list
 
-
+# TODO (INT4-FP8)
 def permute_weight(x: torch.Tensor) -> torch.Tensor:
     b_ = x.shape[0]
     n_ = x.shape[1]

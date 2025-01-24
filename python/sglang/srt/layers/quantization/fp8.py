@@ -601,6 +601,7 @@ class Fp8MoEMethod:
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if get_bool_env_var("USE_INT4_WEIGHT"):
+            # TODO (INT4-FP8)
             if get_bool_env_var("CK_MOE"):
                 layer.w13_weight = torch.nn.Parameter(
                     permute_weight(layer.w13_weight.data),
@@ -834,27 +835,28 @@ class Fp8MoEMethod:
             import ater
             from ater.fused_moe import fused_experts_ck
 
-            # TODO change new API for this
-            return fused_experts_ck(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                use_fp8_w8a8=True,
-                w1_scale=(
-                    layer.w13_weight_scale_inv
-                    if self.block_quant
-                    else layer.w13_weight_scale
-                ),
-                w2_scale=(
-                    layer.w2_weight_scale_inv
-                    if self.block_quant
-                    else layer.w2_weight_scale
-                ),
-                a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
-            )
+            # TODO (INT4-FP8)
+            if get_bool_env_var("USE_INT4_WEIGHT"):
+                return fused_experts_ck(
+                    x,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    use_fp8_w8a8=True,
+                    w1_scale=(
+                        layer.w13_weight_scale_inv
+                        if self.block_quant
+                        else layer.w13_weight_scale
+                    ),
+                    w2_scale=(
+                        layer.w2_weight_scale_inv
+                        if self.block_quant
+                        else layer.w2_weight_scale
+                    ),
+                    a1_scale=layer.w13_input_scale,
+                    a2_scale=layer.w2_input_scale,
+                )
 
         else:
             # Expert fusion with FP8 quantization
