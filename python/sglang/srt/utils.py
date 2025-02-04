@@ -73,7 +73,7 @@ def is_hip() -> bool:
 
 
 def is_cuda():
-    return hasattr(torch, "cuda") and torch.cuda.is_available()
+    return hasattr(torch, "cuda") and torch.version.cuda is not None
 
 
 def is_cuda_alike():
@@ -1315,7 +1315,8 @@ def permute_weight(x: torch.Tensor) -> torch.Tensor:
     elif x.dtype == torch.float8_e4m3fnuz or x.dtype == torch.int8:
         x_ = x_.view(int(b_), int(n_ / 16), 16, int(k_ / 64), 4, 16)
     else:
-        return x_
+        x_ = x_.view(int(b_), int(n_ / 16), 16, int(k_ / 8), 4, 2)
+        #return x_
 
     x_ = x_.permute(0, 1, 3, 4, 2, 5)
     x_ = x_.contiguous()

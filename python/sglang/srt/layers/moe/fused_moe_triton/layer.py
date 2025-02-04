@@ -488,8 +488,7 @@ class FusedMoE(torch.nn.Module):
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
             if get_bool_env_var("USE_INT4_WEIGHT"):
-                loaded_weight = loaded_weight * 2
-
+                loaded_weight = loaded_weight * 2.0
             loaded_weight = loaded_weight.to(param.data.device)
 
             if (
@@ -549,7 +548,7 @@ class FusedMoE(torch.nn.Module):
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 if get_bool_env_var("USE_INT4_WEIGHT"):
-                    loaded_weight = loaded_weight * 2
+                    loaded_weight = loaded_weight * 2.0
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
