@@ -827,20 +827,29 @@ class ServerArgs:
         )
 
         # Kernel backend
-        parser.add_argument(
-            "--attention-backend",
-            type=str,
-            choices=[
-                "flashinfer",
-                "triton",
-                "torch_native",
-                "fa3",
-                "flashmla",
-                "cutlass_mla",
-            ],
-            default=ServerArgs.attention_backend,
-            help="Choose the kernels for attention layers.",
-        )
+        if is_hip():
+            parser.add_argument(
+                "--attention-backend",
+                type=str,
+                choices=["triton", "torch_native", "aiter", "aiter_decode"],
+                default=ServerArgs.attention_backend,
+                help="Choose the kernels for attention layers.",
+            )
+        else:
+            parser.add_argument(
+                "--attention-backend",
+                type=str,
+                choices=[
+                    "flashinfer",
+                    "triton",
+                    "torch_native",
+                    "fa3",
+                    "flashmla",
+                    "cutlass_mla",
+                ],
+                default=ServerArgs.attention_backend,
+                help="Choose the kernels for attention layers.",
+            )
         parser.add_argument(
             "--sampling-backend",
             type=str,

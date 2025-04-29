@@ -91,6 +91,13 @@ from sglang.srt.utils import (
     set_cuda_arch,
 )
 
+is_hip_ = is_hip()
+
+if is_hip_:
+    from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
+    from sglang.srt.layers.attention.aiter_decode_backend import AiterDecodeAttnBackend
+
+
 # Use a small KV cache pool size for tests in CI
 SGLANG_CI_SMALL_KV_SIZE = os.getenv("SGLANG_CI_SMALL_KV_SIZE", None)
 
@@ -907,6 +914,32 @@ class ModelRunner:
                 from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 
                 self.attn_backend = TritonAttnBackend(self)
+        elif is_hip_:
+            # AMD hip supported attention backends
+            if self.server_args.attention_backend == "aiter":
+                self.attn_backend = AiterAttnBackend(self)
+            elif self.server_args.attention_backend == "aiter_decode":
+                self.attn_backend = AiterDecodeAttnBackend(self)
+            elif self.server_args.attention_backend == "triton":
+                assert self.sliding_window_size is None, (
+                    "Window attention is not supported in the triton attention backend. "
+                    "Please use `--attention-backend flashinfer`."
+                )
+                assert not self.model_config.is_encoder_decoder, (
+                    "Cross attention is not supported in the triton attention backend. "
+                    "Please use `--attention-backend flashinfer`."
+                )
+                if self.server_args.enable_double_sparsity:
+                    self.attn_backend = DoubleSparseAttnBackend(self)
+                else:
+                    self.attn_backend = TritonAttnBackend(self)
+            elif self.server_args.attention_backend == "torch_native":
+                self.attn_backend = TorchNativeAttnBackend(self)
+            else:
+                raise ValueError(
+                    f"Invalid attention backend: {self.server_args.attention_backend}"
+                )
+
         elif self.server_args.attention_backend == "torch_native":
             from sglang.srt.layers.attention.torch_native_backend import (
                 TorchNativeAttnBackend,
