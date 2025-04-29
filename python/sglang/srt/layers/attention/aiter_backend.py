@@ -102,7 +102,7 @@ class AiterAttnBackend(AttentionBackend):
 
         # Create prefill indices updater
         if not skip_prefill:
-            self.indices_updater_prefill = FlashInferIndicesUpdaterPrefill(model_runner, self)
+            self.indices_updater_prefill = AiterIndicesUpdaterPrefill(model_runner, self)
         
         # aiter kernel related initialization
         self.max_num_partitions = (
@@ -414,7 +414,7 @@ class AiterAttnBackend(AttentionBackend):
         return o
 
 
-class FlashInferIndicesUpdaterPrefill:
+class AiterIndicesUpdaterPrefill:
     def __init__(self, model_runner: ModelRunner, attn_backend: AttentionBackend):
         # Parse Constants
         self.num_qo_heads = (
