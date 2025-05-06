@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import SpecInfo
     
 try:    
-    from aiter import flash_attn_varlen_func
+    from aiter import flash_attn_varlen_func, mha_batch_prefill_func
     from aiter import paged_attention_ragged
     from aiter import ragged_layout_trans
 except ImportError:
@@ -342,15 +342,46 @@ class AiterAttnBackend(AttentionBackend):
         #max_len_extend = (q.shape[0] + _AITER_PARTITION_SIZE_ROCM - 1) // _AITER_PARTITION_SIZE_ROCM * _AITER_PARTITION_SIZE_ROCM
 
         bs0 = forward_batch.batch_size + 1
-        k, v = ragged_layout_trans(self.forward_metadata.kv_indptr[0:bs0], self.forward_metadata.kv_indices, k_cache, v_cache)
+        #if self.forward_metadata.max_q_len > 8192:
+        #    k, v = ragged_layout_trans(self.forward_metadata.kv_indptr[0:bs0], self.forward_metadata.kv_indices, k_cache, v_cache)
+        #    o = flash_attn_varlen_func(
+        #        q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
+        #        k,
+        #        v,
+        #        self.qo_indptr[:bs0],
+        #        self.forward_metadata.kv_indptr[:bs0],
+        #        self.forward_metadata.max_q_len, #max_len_extend,
+        #        self.forward_metadata.max_kv_len, #max_len_in_batch,
+        #        causal=True,
+        #        logits_soft_cap=self.logits_soft_cap,
+        #        alibi_slopes=None,
+        #        return_lse=False,
+        #        return_attn_probs=False,
+        #    )
+        #else:
+        #    o = mha_batch_prefill_func(
+        #        q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
+        #        k_cache,
+        #        v_cache,
+        #        self.qo_indptr[:bs0],
+        #        self.forward_metadata.kv_indptr[:bs0],
+        #        self.forward_metadata.kv_indices,
+        #        self.forward_metadata.max_q_len, #max_len_extend,
+        #        self.forward_metadata.max_kv_len, #max_len_in_batch,
+        #        causal=True,
+        #        logits_soft_cap=self.logits_soft_cap,
+        #        alibi_slopes=None,
+        #        return_lse=False,
+        #        return_attn_probs=False,
+        #    )
 
-
-        o = flash_attn_varlen_func(
+        o = mha_batch_prefill_func(
             q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
-            k,
-            v,
+            k_cache,
+            v_cache,
             self.qo_indptr[:bs0],
             self.forward_metadata.kv_indptr[:bs0],
+            self.forward_metadata.kv_indices,
             self.forward_metadata.max_q_len, #max_len_extend,
             self.forward_metadata.max_kv_len, #max_len_in_batch,
             causal=True,
@@ -359,7 +390,6 @@ class AiterAttnBackend(AttentionBackend):
             return_lse=False,
             return_attn_probs=False,
         )
-
 
         return o.view(-1, layer.tp_q_head_num * layer.head_dim)
 
@@ -502,4 +532,3 @@ class AiterIndicesUpdaterPrefill:
             )
 
         self.kv_indices = kv_indices
-
