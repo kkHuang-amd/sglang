@@ -163,6 +163,22 @@ def cp_lse_ag_out_rs_mla_npu(
     return merged.view(batch_size, local_heads, head_dim).to(cp_attn_out.dtype)
 
 
+def _all_gather_bytes(
+    group: GroupCoordinator, out: torch.Tensor, inp: torch.Tensor
+) -> None:
+    # pynccl has no fp8 dtype; all-gather is a byte copy, so transport an fp8 KV
+    # cache as raw bytes via a uint8 view (works with --kv-cache-dtype fp8_*).
+    inp = inp.contiguous().view(torch.uint8)
+    out = out.view(torch.uint8)
+    # aiter's custom all-gather takes 16-bit floats only: carry even-width rows as bf16.
+    # The choice depends on the row width alone, so every rank picks the same transport.
+    if get_platform().is_hip and inp.shape[-1] % 2 == 0:
+        if inp.storage_offset() % 2:
+            inp = inp.clone()
+        inp, out = inp.view(torch.bfloat16), out.view(torch.bfloat16)
+    group.all_gather_into_tensor(out, inp)
+
+
 def _all_gather_dcp_kv_cache(kv_a: torch.Tensor):
     parallel = get_parallel()
     dcp_world_size = parallel.dcp_size
@@ -170,12 +186,8 @@ def _all_gather_dcp_kv_cache(kv_a: torch.Tensor):
     gathered_kv_a = kv_a.new_empty(
         (kv_a.shape[0] * dcp_world_size, *kv_a.shape[1:]),
     )
-    # pynccl has no fp8 dtype; all-gather is a byte copy, so transport an fp8 KV
-    # cache as raw bytes via a uint8 view (works with --kv-cache-dtype fp8_*).
-    if kv_a.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        parallel.dcp_group.all_gather_into_tensor(
-            gathered_kv_a.view(torch.uint8), kv_a.contiguous().view(torch.uint8)
-        )
+    if kv_a.dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8):
+        _all_gather_bytes(parallel.dcp_group, gathered_kv_a, kv_a)
     else:
         parallel.dcp_group.all_gather_into_tensor(gathered_kv_a, kv_a)
     # Reorder large byte-packed rows with word loads after the collective,

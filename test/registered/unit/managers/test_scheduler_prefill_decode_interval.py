@@ -14,21 +14,29 @@ register_cpu_ci(est_time=11, suite="base-a-test-cpu")
 
 
 def _make_scheduler(
-    *, interval: int, min_bs: int, require_mlp_sync: bool = False
+    *,
+    interval: int,
+    min_bs: int,
+    require_mlp_sync: bool = False,
+    fixed_tokens: int = 0,
+    chunk_tokens: int = 16384,
 ) -> Scheduler:
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.prefill_decode_interval = interval
     scheduler._prefill_decode_interval_remaining = 0
     scheduler.prefill_decode_interval_min_bs = min_bs
+    scheduler.prefill_decode_interval_fixed_tokens = fixed_tokens
+    scheduler.chunked_prefill_size = chunk_tokens
     scheduler.require_mlp_sync = require_mlp_sync
     return scheduler
 
 
-def _arm(scheduler: Scheduler) -> None:
+def _arm(scheduler: Scheduler, extend_tokens: int = 16384) -> None:
     scheduler._arm_prefill_decode_interval(
         SimpleNamespace(
             forward_mode=SimpleNamespace(is_extend=lambda: True),
             is_extend_in_batch=True,
+            extend_num_tokens=extend_tokens,
         )
     )
 
@@ -102,6 +110,37 @@ class TestPrefillDecodeIntervalNothingDecodes(unittest.TestCase):
         running = _make_running_batch(3, prefill_only=True)
         self.assertTrue(scheduler._should_defer_prefill(running))
         self.assertFalse(scheduler._should_defer_prefill(_make_running_batch(0)))
+
+
+class TestPrefillDecodeIntervalFixedTokens(unittest.TestCase):
+    # interval 32, chunk 16384, fixed cost 1600 tokens: rounds = ceil(32 * (n + 1600) / 17984).
+
+    def test_rounds_scale_with_batch_cost_and_a_full_chunk_keeps_the_interval(self):
+        # A full chunk must keep the whole interval: that is what bounds the share of
+        # time decode stalls behind prefill at the fixed-interval level.
+        for extend_tokens, rounds in ((16384, 32), (20000, 32), (3500, 10), (1, 3)):
+            scheduler = _make_scheduler(interval=32, min_bs=0, fixed_tokens=1600)
+            _arm(scheduler, extend_tokens=extend_tokens)
+            self.assertEqual(
+                scheduler._prefill_decode_interval_remaining, rounds, extend_tokens
+            )
+
+    def test_never_drops_below_one_round(self):
+        scheduler = _make_scheduler(interval=4, min_bs=0, fixed_tokens=1)
+        _arm(scheduler, extend_tokens=1)
+        self.assertEqual(scheduler._prefill_decode_interval_remaining, 1)
+
+    def test_fixed_interval_kept_when_disabled_dp_or_unchunked(self):
+        cases = (
+            dict(fixed_tokens=0),
+            # DP ranks run different token counts; their cadence must stay identical.
+            dict(fixed_tokens=1600, require_mlp_sync=True),
+            dict(fixed_tokens=1600, chunk_tokens=-1),
+        )
+        for kwargs in cases:
+            scheduler = _make_scheduler(interval=32, min_bs=0, **kwargs)
+            _arm(scheduler, extend_tokens=100)
+            self.assertEqual(scheduler._prefill_decode_interval_remaining, 32, kwargs)
 
 
 if __name__ == "__main__":

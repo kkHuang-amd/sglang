@@ -295,6 +295,9 @@ from sglang.srt.managers.scheduler_components.output_streamer import (
 from sglang.srt.managers.scheduler_components.pool_stats_observer import (
     SchedulerPoolStatsObserver,
 )
+from sglang.srt.managers.scheduler_components.prefill_decode_interval import (
+    prefill_decode_interval_rounds,
+)
 from sglang.srt.managers.scheduler_components.profiler_manager import (
     SchedulerProfilerManager,
 )
@@ -1430,6 +1433,9 @@ class Scheduler(
         self.prefill_decode_interval_min_bs = (
             get_schedule().prefill_decode_interval_min_bs
         )
+        self.prefill_decode_interval_fixed_tokens = (
+            get_schedule().prefill_decode_interval_fixed_tokens
+        )
         uses_transformers_backend = (
             get_resolved_model_impl(self.model_config) == ModelImpl.TRANSFORMERS
         )
@@ -1652,7 +1658,17 @@ class Scheduler(
             if self.require_mlp_sync
             else batch.forward_mode.is_extend()
         )
-        if is_extend:
+        if not is_extend:
+            return
+        if self.prefill_decode_interval_fixed_tokens > 0 and not self.require_mlp_sync:
+            # DP ranks run different token counts, so DP keeps the fixed cadence.
+            self._prefill_decode_interval_remaining = prefill_decode_interval_rounds(
+                interval=self.prefill_decode_interval,
+                extend_tokens=batch.extend_num_tokens,
+                chunk_tokens=self.chunked_prefill_size,
+                fixed_tokens=self.prefill_decode_interval_fixed_tokens,
+            )
+        else:
             self._prefill_decode_interval_remaining = self.prefill_decode_interval
 
     def init_metrics_reporter(self) -> None:

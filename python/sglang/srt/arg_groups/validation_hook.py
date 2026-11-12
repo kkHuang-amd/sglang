@@ -682,6 +682,8 @@ def validate_prefill_decode_interval(server_args: Any):
         raise ValueError("--prefill-decode-interval must be non-negative.")
     if cfg.prefill_decode_interval_min_bs < 0:
         raise ValueError("--prefill-decode-interval-min-bs must be non-negative.")
+    if cfg.prefill_decode_interval_fixed_tokens < 0:
+        raise ValueError("--prefill-decode-interval-fixed-tokens must be non-negative.")
 
 
 def default_unset_prefill_decode_interval(server_args: Any):

@@ -64,6 +64,10 @@ class Schedule(msgspec.Struct):
         int,
         "Apply --prefill-decode-interval only while the running batch holds at least this many requests. Below it, prefill is admitted every round so the batch fills quickly. In data-parallel attention mode, each rank compares its own running batch. Set to 0 to apply the interval at any batch size.",
     ] = 0
+    prefill_decode_interval_fixed_tokens: A[
+        int,
+        "Scale --prefill-decode-interval by the cost of the prefill batch that just ran: wait ceil(interval * (n + T) / (chunk + T)) decode rounds, where n is the batch's new tokens, chunk is --chunked-prefill-size and T is this value, the per-forward fixed cost expressed in tokens. A full chunk keeps the whole interval and a small prefill waits proportionally less. Ignored in data-parallel attention mode and when chunked prefill is disabled. Set to 0 to keep the fixed interval.",
+    ] = 0
     enable_dynamic_chunking: A[
         bool,
         "Enable dynamic chunk size adjustment for pipeline parallelism. When enabled, chunk sizes are dynamically calculated based on fitted function to maintain consistent execution time across chunks.",
