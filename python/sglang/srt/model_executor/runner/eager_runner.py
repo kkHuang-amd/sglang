@@ -251,6 +251,45 @@ class EagerRunner(BaseRunner):
                 **kwargs,
             )
 
+    def plan_extend_metadata(self, forward_batch: ForwardBatch, attn_backend) -> None:
+        """Plan an extend-shaped batch's attention metadata on ``attn_backend``,
+        inside the forward context whose pools the batch reads."""
+        model_runner = self.model_runner
+        if (
+            get_parallel().attn_dcp_size > 1
+            and hasattr(
+                model_runner.model, "prepare_context_parallel_metadata_for_dcp"
+            )
+            and forward_batch.extend_prefix_lens is not None
+            # MLA target verify uses rank-local decode KV and LSE merge,
+            # not the prefill KV gather layout (or its prefix lengths).
+            and not (
+                forward_batch.forward_mode.is_target_verify()
+                and model_runner.model_config.attention_arch == AttentionArch.MLA
+            )
+        ):
+            # prepare kv cache buffer for dcp to gather kv cache
+            forward_batch.attn_dcp_metadata = (
+                model_runner.model.prepare_context_parallel_metadata_for_dcp(
+                    forward_batch.seq_lens,
+                    forward_batch.extend_prefix_lens,
+                    forward_batch.extend_prefix_lens_cpu,
+                    forward_batch.extend_seq_lens,
+                    forward_batch.req_pool_indices,
+                    get_req_to_token_pool().req_to_token,
+                    forward_batch.seq_lens_sum,
+                    get_token_to_kv_pool().get_kv_buffer_shape()[0],
+                    model_runner.kv_cache_dtype,
+                    model_runner.device,
+                    create_chunked_prefix_cache_kv_indices,
+                )
+            )
+        if hasattr(model_runner.model, "prepare_forward_batch"):
+            # Prepare model-specific attention metadata before planning,
+            # e.g. Moss-VL's prefill cross-attention custom mask.
+            model_runner.model.prepare_forward_batch(forward_batch)
+        attn_backend.init_forward_metadata(forward_batch)
+
     def _execute_extend(
         self,
         forward_batch: ForwardBatch,
@@ -276,40 +315,7 @@ class EagerRunner(BaseRunner):
             or cp_active
             or forward_batch.forward_mode.is_target_verify()
         ):
-            if (
-                get_parallel().attn_dcp_size > 1
-                and hasattr(
-                    model_runner.model, "prepare_context_parallel_metadata_for_dcp"
-                )
-                and forward_batch.extend_prefix_lens is not None
-                # MLA target verify uses rank-local decode KV and LSE merge,
-                # not the prefill KV gather layout (or its prefix lengths).
-                and not (
-                    forward_batch.forward_mode.is_target_verify()
-                    and model_runner.model_config.attention_arch == AttentionArch.MLA
-                )
-            ):
-                # prepare kv cache buffer for dcp to gather kv cache
-                forward_batch.attn_dcp_metadata = (
-                    model_runner.model.prepare_context_parallel_metadata_for_dcp(
-                        forward_batch.seq_lens,
-                        forward_batch.extend_prefix_lens,
-                        forward_batch.extend_prefix_lens_cpu,
-                        forward_batch.extend_seq_lens,
-                        forward_batch.req_pool_indices,
-                        get_req_to_token_pool().req_to_token,
-                        forward_batch.seq_lens_sum,
-                        get_token_to_kv_pool().get_kv_buffer_shape()[0],
-                        model_runner.kv_cache_dtype,
-                        model_runner.device,
-                        create_chunked_prefix_cache_kv_indices,
-                    )
-                )
-            if hasattr(model_runner.model, "prepare_forward_batch"):
-                # Prepare model-specific attention metadata before planning,
-                # e.g. Moss-VL's prefill cross-attention custom mask.
-                model_runner.model.prepare_forward_batch(forward_batch)
-            model_runner.attn_backend.init_forward_metadata(forward_batch)
+            self.plan_extend_metadata(forward_batch, model_runner.attn_backend)
             shared_read_ends = (
                 model_runner.attn_backend.resolve_prefill_shared_read_ends(
                     forward_batch,

@@ -201,6 +201,7 @@ from sglang.srt.model_executor.runner import (
     EagerRunner,
     get_batch_sizes_to_capture,
 )
+from sglang.srt.model_executor.runner.mixed_verify_runner import MixedVerifyRunner
 from sglang.srt.models.unlimited_ocr_v2_support.greedy_graph import UocrGreedyGraph
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import (
@@ -1182,6 +1183,13 @@ class ModelRunner:
 
         if get_parallel().dcp_enabled and get_parallel().dcp_replicate_q_proj:
             self._prepare_replicated_q_proj()
+        self.maybe_init_mixed_verify_runner()
+
+    def maybe_init_mixed_verify_runner(self):
+        """Runner of mixed extend + target-verify forwards (--speculative-mixed-verify)."""
+        self.mixed_verify_runner = None
+        if get_spec().speculative_mixed_verify and not self.is_draft_worker:
+            self.mixed_verify_runner = MixedVerifyRunner(self)
 
     def _prepare_replicated_q_proj(self) -> None:
         # --dcp-replicate-q-proj: gather each rank's attn_tp head-shard of

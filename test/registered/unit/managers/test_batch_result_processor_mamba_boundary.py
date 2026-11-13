@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from sglang.srt.managers.schedule_batch import (
+    NextBatchPlan,
     Req,
     ScheduleBatch,
     set_mamba_track_indices_from_reqs,
@@ -135,17 +136,17 @@ class TestMambaBoundaryMaskReuse(unittest.TestCase):
                     plan_count += 1
                     if plan_count == 1:
                         batch.prepare_for_decode()
-                        return SimpleNamespace(
+                        return NextBatchPlan(
                             running_batch=batch,
                             batch_to_run=batch,
                         )
                     if plan_count == 2 and schedule_next_decode:
                         batch.prepare_for_decode()
-                        return SimpleNamespace(
+                        return NextBatchPlan(
                             running_batch=batch,
                             batch_to_run=batch,
                         )
-                    return SimpleNamespace(
+                    return NextBatchPlan(
                         running_batch=batch,
                         batch_to_run=None,
                     )

@@ -197,6 +197,19 @@ def handle_speculative_decoding(server_args: ServerArgs) -> None:
                 speculative_use_rejection_sampling=True,
             )
 
+    if cfg.speculative_mixed_verify:
+        if cfg.speculative_algorithm != "DFLASH":
+            raise ValueError("--speculative-mixed-verify only supports DFLASH.")
+        if cfg.enable_mixed_chunk:
+            raise ValueError(
+                "--speculative-mixed-verify and --enable-mixed-chunk both mix "
+                "running requests into a prefill step; enable one."
+            )
+        if cfg.enable_dp_attention:
+            raise ValueError(
+                "--speculative-mixed-verify does not support DP attention."
+            )
+
     # Validate --speculative-draft-window-size / --speculative-draft-sink-size once,
     # regardless of algorithm. Consumed by DFLASH (compact draft KV cache), Llama
     # EAGLE-3 (drafter attention SWA), and the built-in MTP/NEXTN + EAGLE draft-decode

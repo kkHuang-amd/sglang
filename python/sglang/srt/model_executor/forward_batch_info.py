@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     from sglang.srt.managers.req_types import MultimodalInputs
     from sglang.srt.managers.schedule_batch import ScheduleBatch
     from sglang.srt.mem_cache.kv.alloc.iteration_ids import Cols, IterationIds
+    from sglang.srt.model_executor.mixed_verify import MixedVerifySegments
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
     from sglang.srt.speculative.ragged_verify import RaggedVerifyLayout
@@ -692,6 +693,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     tbo_parent_token_range: Optional[Tuple[int, int]] = None
     tbo_padded_len: Optional[int] = None
     tbo_children: Optional[List[ForwardBatch]] = None
+
+    # Set on the parent of a mixed-verify forward: rows are [extend | verify]
+    # and attention runs per segment (model_executor/mixed_verify.py).
+    mixed_verify: Optional[MixedVerifySegments] = None
 
     attn_cp_metadata: Optional[BaseContextParallelMetadata] = None
 

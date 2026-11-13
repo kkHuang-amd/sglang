@@ -4,6 +4,7 @@ import math
 import os
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
+import msgspec
 import torch
 
 from sglang.kernels.ops.memory.small_copy import try_small_copy
@@ -245,6 +246,18 @@ class _DflashDraftSampler:
         selected = self.selected_ids[:, :n]
         torch.gather(gathered_ids.view(self.tp_size, n), 0, best_rank, out=selected)
         self.out[:n].copy_(selected.view(-1))
+
+
+# Mixed verify steps that log one line, so a server log shows they run.
+_MIXED_VERIFY_LOG_STEPS = frozenset(10**k for k in range(7))
+
+
+class _MixedExtendStep(msgspec.Struct):
+    """A prefill batch whose target forward runs inside a verify's forward."""
+
+    batch: ScheduleBatch
+    forward_batch: Optional[ForwardBatch] = None
+    logits_output: Optional[LogitsProcessorOutput] = None
 
 
 def _commit_accept(candidates, accept_len, bonus_tokens):
@@ -527,6 +540,11 @@ class DFlashWorkerV2(BaseSpecWorker):
         self._target_worker = target_worker
         self.model_runner = target_worker.model_runner
         self._need_mamba_verify_commit = False
+        # Mixed-verify handoff between a decode step and the prefill step after
+        # it: staged by the scheduler, then run by the decode's target forward.
+        self._staged_mixed_extend: Optional[_MixedExtendStep] = None
+        self._ran_mixed_extend: Optional[_MixedExtendStep] = None
+        self._mixed_verify_ct = 0
         self.page_size = get_schedule().page_size
         # Normalized in arg_groups.speculative_hook.handle_speculative_decoding.
         self.draft_window_size: Optional[int] = get_spec().speculative_draft_window_size
@@ -2838,8 +2856,10 @@ class DFlashWorkerV2(BaseSpecWorker):
         seq_lens_pre_verify: torch.Tensor,
         seq_lens_post_verify: torch.Tensor,
         commit_lens: torch.Tensor,
+        attn_backend,
     ) -> None:
-        """Commit Mamba intermediate states for accepted verify steps.
+        """Commit Mamba intermediate states for accepted verify steps, on the
+        backend that ran the verify (it holds the verify's state indices).
 
         During TARGET_VERIFY, Mamba kernels run with `disable_state_update=True` and
         cache per-step intermediate states. After acceptance, we need to commit the
@@ -2853,7 +2873,6 @@ class DFlashWorkerV2(BaseSpecWorker):
             commit_lens=commit_lens,
         ):
             return
-        attn_backend = self.target_worker.model_runner.attn_backend
 
         mamba_steps_to_track = None
         if self._use_commit_metadata:
@@ -3510,6 +3529,79 @@ class DFlashWorkerV2(BaseSpecWorker):
             )
             self._warned_sampling_fallback = True
 
+    @property
+    def supports_mixed_verify(self) -> bool:
+        return (
+            self.target_worker.model_runner.mixed_verify_runner is not None
+            and self._hosts_draft
+            # These read the verify's shard or state through the megakernel.
+            and self._megakernel_accept is None
+            and self._megakernel_aux is None
+        )
+
+    def stage_mixed_verify_extend(self, batch: ScheduleBatch) -> None:
+        """Hand over a prefill batch whose target forward the next decode step
+        carries with its verify, as one mixed forward. That prefill batch's own
+        step then finishes from the staged output."""
+        assert self.supports_mixed_verify
+        self._staged_mixed_extend = _MixedExtendStep(batch=batch)
+
+    def _take_staged_mixed_extend(self) -> Optional["_MixedExtendStep"]:
+        step, self._staged_mixed_extend = self._staged_mixed_extend, None
+        return step
+
+    def _forward_mixed_verify(
+        self, step: "_MixedExtendStep", verify_forward_batch: ForwardBatch
+    ) -> GenerationBatchResult:
+        """One target forward over the staged prefill batch's rows and this
+        verify's; the prefill's output stays on the step for its own step."""
+        model_runner = self.target_worker.model_runner
+        self.target_worker.set_hicache_consumer(step.batch.hicache_consumer_index)
+        self._wait_for_fused_hicache_load(step.batch)
+        step.forward_batch = ForwardBatch.init_new(
+            step.batch,
+            model_runner,
+            capture_hidden_mode=CaptureHiddenMode.FULL,
+            return_hidden_states_before_norm=False,
+        )
+        out = model_runner.mixed_verify_runner.execute(
+            extend=step.forward_batch, verify=verify_forward_batch
+        )
+        step.logits_output = out.extend
+        self._mixed_verify_ct += 1
+        if (
+            self._mixed_verify_ct in _MIXED_VERIFY_LOG_STEPS
+            and get_parallel().tp_rank == 0
+        ):
+            logger.info(
+                "DFLASH mixed verify step %d: %d extend rows + %d verify rows.",
+                self._mixed_verify_ct,
+                step.forward_batch.input_ids.shape[0],
+                verify_forward_batch.input_ids.shape[0],
+            )
+        return GenerationBatchResult(logits_output=out.verify, can_run_cuda_graph=False)
+
+    def _mixed_extend_output(
+        self, batch: ScheduleBatch
+    ) -> Optional[GenerationBatchResult]:
+        """The target prefill result of ``batch`` if a mixed forward already ran
+        it; sampled here, inside this batch's own step."""
+        step = self._ran_mixed_extend
+        self._ran_mixed_extend = None
+        if step is None or step.batch is not batch:
+            return None
+        # The forward-only sampling info of this step, not the staging one.
+        step.forward_batch.sampling_info = batch.sampling_info
+        output = GenerationBatchResult(
+            logits_output=step.logits_output,
+            can_run_cuda_graph=False,
+            iteration_ids=step.forward_batch.iteration_ids,
+        )
+        output.next_token_ids = self.target_worker.model_runner.sample(
+            step.logits_output, step.forward_batch
+        )
+        return output
+
     def _make_next_draft_input_prefill(
         self,
         *,
@@ -3556,14 +3648,18 @@ class DFlashWorkerV2(BaseSpecWorker):
             self._join_aux()
 
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
-            self._wait_for_fused_hicache_load(batch)
-            # Target prefill: capture DFlash aux hidden states for prompt tokens.
-            batch_output = self.target_worker.forward_batch_generation(
-                batch,
-                pp_proxy_tensors=pp_proxy_tensors,
-                capture_hidden_mode=CaptureHiddenMode.FULL,
-                return_iteration_ids=True,
-            )
+            batch_output = self._mixed_extend_output(batch)
+            if batch_output is None:
+                # A staged step no decode picked up runs its own forward.
+                self._staged_mixed_extend = None
+                self._wait_for_fused_hicache_load(batch)
+                # Target prefill: capture DFlash aux hidden states for prompt tokens.
+                batch_output = self.target_worker.forward_batch_generation(
+                    batch,
+                    pp_proxy_tensors=pp_proxy_tensors,
+                    capture_hidden_mode=CaptureHiddenMode.FULL,
+                    return_iteration_ids=True,
+                )
             iteration_ids, batch_output.iteration_ids = batch_output.iteration_ids, None
 
             logits_output, next_token_ids = (
@@ -4101,10 +4197,14 @@ class DFlashWorkerV2(BaseSpecWorker):
             batch.seq_lens_cpu = draft_input.nxt_kv_lens_cpu
             batch.seq_lens_sum = int(draft_input.nxt_kv_lens_sum)
 
+        mixed_extend = self._take_staged_mixed_extend()
         verify_forward_batch, _ = verify_input.prepare_for_verify(
             batch,
             self.target_worker,
-            defer_metadata_init=get_parallel().attn_dp_enabled,
+            # The mixed runner plans the verify on its own backend.
+            defer_metadata_init=(
+                get_parallel().attn_dp_enabled or mixed_extend is not None
+            ),
         )
         batch.seq_lens_cpu = seq_lens_cpu_backup
         batch.seq_lens_sum = seq_lens_sum_backup
@@ -4128,14 +4228,22 @@ class DFlashWorkerV2(BaseSpecWorker):
         if get_parallel().attn_dp_enabled and batch.is_extend_in_batch:
             verify_forward_batch.can_run_decode_cuda_graph = False
 
-        target_out = self.target_worker.forward_batch_generation(
-            batch=None,
-            forward_batch=verify_forward_batch,
-            is_verify=True,
-            skip_attn_backend_init=(
-                None if _is_npu or get_parallel().attn_dp_enabled else True
-            ),
-        )
+        verify_attn_backend = self.target_worker.model_runner.attn_backend
+        if mixed_extend is not None:
+            target_out = self._forward_mixed_verify(mixed_extend, verify_forward_batch)
+            self._ran_mixed_extend = mixed_extend
+            verify_attn_backend = (
+                self.target_worker.model_runner.mixed_verify_runner.verify_attn_backend
+            )
+        else:
+            target_out = self.target_worker.forward_batch_generation(
+                batch=None,
+                forward_batch=verify_forward_batch,
+                is_verify=True,
+                skip_attn_backend_init=(
+                    None if _is_npu or get_parallel().attn_dp_enabled else True
+                ),
+            )
         logits_output = target_out.logits_output
         can_run_cuda_graph = target_out.can_run_cuda_graph
         target_predict = None
@@ -4276,6 +4384,7 @@ class DFlashWorkerV2(BaseSpecWorker):
                 seq_lens_pre_verify=seq_lens_pre_verify,
                 seq_lens_post_verify=new_seq_lens,
                 commit_lens=commit_lens,
+                attn_backend=verify_attn_backend,
             )
 
         if new_seq_lens is None:

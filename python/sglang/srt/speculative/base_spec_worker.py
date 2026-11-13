@@ -153,6 +153,9 @@ class EagleDraftWorkerBase(ABC):
 class BaseSpecWorker(ABC):
     _hicache_draft_plan = HiCacheDraftPlan()
     draft_parallel_layout: DraftParallelLayout | None = None
+    # Whether a prefill batch's target forward can ride a decode step's verify
+    # (stage_mixed_verify_extend).
+    supports_mixed_verify: bool = False
 
     def __init__(self) -> None:
         self._additional_graph_memory_usage: dict[str, float] = {}

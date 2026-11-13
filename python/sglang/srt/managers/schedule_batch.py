@@ -3607,3 +3607,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 class NextBatchPlan(msgspec.Struct):
     batch_to_run: Optional[ScheduleBatch]
     running_batch: ScheduleBatch
+    # The running batch's decode step when it rides this prefill step: it runs
+    # first, with the prefill's rows in its target verify forward.
+    mixed_verify_batch: Optional[ScheduleBatch] = None

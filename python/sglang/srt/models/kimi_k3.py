@@ -6,6 +6,7 @@
 #   - MLA output gate (mla_use_output_gate)
 #   - Full-rank KDA gate (use_full_rank_gate)
 
+import dataclasses
 import logging
 import os
 import re
@@ -115,6 +116,14 @@ from sglang.srt.managers.mm_utils import (
 )
 from sglang.srt.managers.req_types import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.forward_context import (
+    forward_context,
+    get_forward_context,
+)
+from sglang.srt.model_executor.mixed_verify import (
+    MixedVerifyOutput,
+    MixedVerifySegments,
+)
 from sglang.srt.model_executor.runner import get_is_capture_mode
 from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context import (
     is_in_breakable_cuda_graph,
@@ -2590,6 +2599,10 @@ class KimiK3DeltaAttention(nn.Module):
             forward_batch=forward_batch,
             zero_allocator=zero_allocator,
         )
+        return self.project_output(core_attn_out)
+
+    def project_output(self, core_attn_out: torch.Tensor) -> torch.Tensor:
+        """o_proj's TP-partial output over the rows of forward_pre_o_proj."""
         if self.all_reduce_fusion:
             out = _k3_symm_o_proj_out(self.o_proj, core_attn_out)
             partial, _ = self.o_proj(core_attn_out, output_tensor=out)
@@ -2809,6 +2822,11 @@ class KimiK3MLAAttention(KimiK3MLAPreOProjMixin, DeepseekV2AttentionMLA):
         if getattr(self, "_kimi_split_gguf_kv_b", False):
             return AttnForwardMethod.MLA
         return method
+
+    def project_output(self, core_attn_out: torch.Tensor) -> torch.Tensor:
+        """o_proj's TP-partial output over the rows of forward_pre_o_proj, which
+        are already gated: the wrapped o_proj has no pending gate input."""
+        return self.o_proj(core_attn_out)[0]
 
     def _fork_output_gate(self, hidden_states: torch.Tensor) -> None:
         """Fork early, but record the gate after attention to limit replay streams."""
@@ -3200,7 +3218,10 @@ class KimiK3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         zero_allocator: BumpAllocator,
+        pre_o_proj: bool = False,
     ) -> torch.Tensor:
+        """The attention output, or with ``pre_o_proj`` the TP-local core
+        output its o_proj takes (self_attn.project_output)."""
         # DP attention: idle ranks (padded to the global shape) have no
         # attention metadata; pass hidden_states through shape-preserving
         # (matching the idle skip in other DP-attention models).
@@ -3219,7 +3240,8 @@ class KimiK3DecoderLayer(nn.Module):
             attn_inputs = AttentionInputs(hidden_states, forward_batch, qkv_latent_func)
             get_attn_tp_context().set_attn_inputs(attn_inputs)
 
-        result = self.self_attn(
+        attn = self.self_attn.forward_pre_o_proj if pre_o_proj else self.self_attn
+        result = attn(
             hidden_states=hidden_states,
             positions=positions,
             forward_batch=forward_batch,
@@ -3233,6 +3255,30 @@ class KimiK3DecoderLayer(nn.Module):
 
         return result
 
+    def _run_self_attn_per_segment(
+        self,
+        hidden_states: torch.Tensor,
+        segments: MixedVerifySegments,
+        zero_allocator: BumpAllocator,
+    ) -> torch.Tensor:
+        """Mixed-verify forward: the attention core over each row segment, with
+        that segment's batch and the backend holding its metadata; o_proj then
+        projects every row at once."""
+        ctx = get_forward_context()
+        cores = []
+        for segment, backend, rows in segments.with_backends(ctx.attn_backend):
+            with forward_context(dataclasses.replace(ctx, attn_backend=backend)):
+                cores.append(
+                    self._run_self_attn(
+                        hidden_states[rows],
+                        segment.positions,
+                        segment,
+                        zero_allocator,
+                        pre_o_proj=True,
+                    )
+                )
+        return self.self_attn.project_output(torch.cat(cores, dim=0))
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -3244,9 +3290,14 @@ class KimiK3DecoderLayer(nn.Module):
         hidden_states = self.attn_boundary.prepare(
             hidden_states, forward_batch, capture_gathered=capture_gathered
         )
-        hidden_states = self._run_self_attn(
-            hidden_states, positions, forward_batch, zero_allocator
-        )
+        if forward_batch.mixed_verify is not None:
+            hidden_states = self._run_self_attn_per_segment(
+                hidden_states, forward_batch.mixed_verify, zero_allocator
+            )
+        else:
+            hidden_states = self._run_self_attn(
+                hidden_states, positions, forward_batch, zero_allocator
+            )
         hidden_states = self.attn_boundary.finish(hidden_states, forward_batch)
         hidden_states = self.ffn_boundary.prepare(hidden_states, forward_batch)
         if isinstance(self.mlp, KimiK3MoE) and self.mlp._use_mega_moe:
@@ -3414,8 +3465,10 @@ class KimiK3LinearModel(nn.Module):
 
         total_num_layers = self.end_layer - self.start_layer
         device = hidden_states.device
+        # A mixed-verify forward runs each layer's attention once per segment.
+        attn_calls_per_layer = 1 if forward_batch.mixed_verify is None else 2
         zero_allocator = BumpAllocator(
-            buffer_size=total_num_layers * 2,
+            buffer_size=total_num_layers * 2 * attn_calls_per_layer,
             dtype=torch.float32,
             device=device,
         )
@@ -3679,6 +3732,10 @@ class KimiK3LinearForCausalLM(nn.Module):
             aux_hidden_states = None
             if self.capture_aux_hidden_states:
                 hidden_states, aux_hidden_states = hidden_states
+            if forward_batch.mixed_verify is not None:
+                return self._mixed_verify_logits(
+                    hidden_states, aux_hidden_states, forward_batch.mixed_verify
+                )
             return self.logits_processor(
                 input_ids,
                 hidden_states,
@@ -3687,6 +3744,30 @@ class KimiK3LinearForCausalLM(nn.Module):
                 aux_hidden_states,
             )
         return hidden_states
+
+    def _mixed_verify_logits(
+        self,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: Optional[torch.Tensor],
+        segments: MixedVerifySegments,
+    ) -> MixedVerifyOutput:
+        """Each segment's logits and captured hidden states, as its own forward
+        would return them."""
+        split = segments.num_extend_tokens
+
+        def logits(segment: ForwardBatch, rows: slice):
+            return self.logits_processor(
+                segment.input_ids,
+                hidden_states[rows],
+                self.lm_head,
+                segment,
+                None if aux_hidden_states is None else aux_hidden_states[rows],
+            )
+
+        return MixedVerifyOutput(
+            extend=logits(segments.extend, slice(0, split)),
+            verify=logits(segments.verify, slice(split, None)),
+        )
 
     def prepare_cp_inputs(self, forward_batch: ForwardBatch, **kwargs):
         """Prefill CP under CP-TP group sharing: embed every token on the first

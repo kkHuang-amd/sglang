@@ -122,6 +122,16 @@ class Spec(msgspec.Struct):
         "Use block verification for EAGLE/EAGLE3/NEXTN (requires topk=1) or for "
         "sampled DFLASH/DSPARK drafts, on CUDA or ROCm.",
     ] = False
+    speculative_mixed_verify: A[
+        bool,
+        "DFLASH: run the running requests' target verify inside a large "
+        "prefill forward (one mixed step) instead of making them wait for it.",
+    ] = False
+    speculative_mixed_verify_min_extend_tokens: A[
+        int,
+        "Smallest prefill batch, in tokens, that carries the running requests' "
+        "verify under --speculative-mixed-verify.",
+    ] = 4096
     speculative_token_map: A[
         Optional[str],
         "The path of the draft model's small vocab table.",

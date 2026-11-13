@@ -1457,6 +1457,12 @@ class Scheduler(
         self.is_mixed_chunk = (
             self.chunked_prefill_size is not None and get_schedule().enable_mixed_chunk
         )
+        # None: prefill steps never carry the running requests' verify.
+        self.mixed_verify_min_extend_tokens: Optional[int] = (
+            get_spec().speculative_mixed_verify_min_extend_tokens
+            if get_spec().speculative_mixed_verify
+            else None
+        )
         self.pp_min_chunked_prefill_size = None
         if (
             get_schedule().pp_min_chunked_prefill_size is not None
@@ -1984,7 +1990,10 @@ class Scheduler(
                 "using async D2H copy worker to preserve overlap scheduling."
             )
 
-        self.batch_record_buf = [None] * 2
+        # Two iterations of launched batches; a mixed-verify step launches two.
+        self.batch_record_buf = [None] * (
+            2 if self.mixed_verify_min_extend_tokens is None else 4
+        )
         self.batch_record_ct = 0
 
     def maybe_init_ngram_embedding(self):
@@ -2325,10 +2334,12 @@ class Scheduler(
             Tuple[ScheduleBatch, Union[GenerationBatchResult, EmbeddingBatchResult]]
         ] = deque()
 
-        def pop_and_process():
-            # Process the results of the last batch
-            tmp_batch, tmp_result = self.result_queue.popleft()
-            self.process_batch_result(tmp_batch, tmp_result)
+        def pop_and_process(num_launched: int = 0):
+            # Process the results of the last step: one batch, or a mixed-verify
+            # step's decode then its prefill.
+            while len(self.result_queue) > num_launched:
+                tmp_batch, tmp_result = self.result_queue.popleft()
+                self.process_batch_result(tmp_batch, tmp_result)
 
         while True:
             if self.gracefully_exit:
@@ -2364,11 +2375,16 @@ class Scheduler(
             self.cur_batch_for_debug = batch
 
             # Launch the current batch
+            num_launched = 0
             if batch:
+                if plan.mixed_verify_batch is not None:
+                    self.launch_mixed_verify_decode(plan.mixed_verify_batch, batch)
+                    num_launched += 1
                 batch_result = self.run_batch(batch)
                 # Fence result processing behind this forward's shared reads.
                 self._apply_war_barrier()
                 self.result_queue.append((batch.copy(), batch_result))
+                num_launched += 1
             else:
                 batch_result = None
                 self._sched_idled = True
@@ -2376,7 +2392,7 @@ class Scheduler(
             # Process the last batch
             if self.last_batch:
                 if not process_last_batch_early:
-                    pop_and_process()
+                    pop_and_process(num_launched)
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.on_idle()
@@ -4375,9 +4391,14 @@ class Scheduler(
             new_batch = self.dp_attn_adapter.maybe_prepare_mlp_sync_batch(new_batch)
             need_mlp_sync = new_batch is None
 
+        mixed_verify_batch = None
         if new_batch is not None:
             # Run prefill first if possible
             ret = new_batch
+            if self._rides_mixed_verify(new_batch, running_batch):
+                decode_batch = self.update_running_batch(running_batch)
+                if decode_batch is not None and not decode_batch.is_empty():
+                    mixed_verify_batch = decode_batch
         else:
             # Run decode (skip for prefill-only batches)
             if not running_batch.is_empty() and not running_batch.is_prefill_only:
@@ -4407,8 +4428,60 @@ class Scheduler(
 
         if ret:
             set_schedule_time_batch(ret)
+        if mixed_verify_batch is not None:
+            if ret is not new_batch:
+                raise RuntimeError(
+                    "the prefill batch a prepared mixed-verify decode rides was replaced"
+                )
+            set_schedule_time_batch(mixed_verify_batch)
 
-        return NextBatchPlan(batch_to_run=ret, running_batch=running_batch)
+        return NextBatchPlan(
+            batch_to_run=ret,
+            running_batch=running_batch,
+            mixed_verify_batch=mixed_verify_batch,
+        )
+
+    def _rides_mixed_verify(
+        self, new_batch: ScheduleBatch, running_batch: ScheduleBatch
+    ) -> bool:
+        """Whether the running batch decodes inside this prefill step
+        (--speculative-mixed-verify) instead of waiting for it."""
+        return (
+            self.mixed_verify_min_extend_tokens is not None
+            and self.enable_overlap
+            and not self.require_mlp_sync
+            and not self.enable_hisparse
+            and self.model_worker.supports_mixed_verify
+            and get_parallel().pp_size == 1
+            # A plain extend: not MIXED, not a diffusion-LM step.
+            and new_batch.forward_mode.is_extend_without_speculative()
+            and not new_batch.forward_mode.is_mixed()
+            and not new_batch.is_dllm()
+            and new_batch.extend_num_tokens >= self.mixed_verify_min_extend_tokens
+            and new_batch.input_embeds is None
+            and not running_batch.is_empty()
+            and not running_batch.is_prefill_only
+            and not (new_batch.return_logprob or running_batch.return_logprob)
+            and not (new_batch.has_grammar or running_batch.has_grammar)
+            and all(r.beam_group is None for r in running_batch.reqs)
+            # Without KV room the decode sits this step out, as it does today;
+            # a mixed step does not retract.
+            and running_batch.check_decode_mem()
+        )
+
+    def launch_mixed_verify_decode(
+        self, decode_batch: ScheduleBatch, extend_batch: ScheduleBatch
+    ) -> None:
+        """Run the running batch's decode step with the prefill batch's rows in
+        its target verify forward; the prefill step that follows finishes from it."""
+        with self.forward_stream_ctx:
+            self.forward_stream.wait_stream(self.schedule_stream)
+            # The worker builds the prefill's forward inside the decode step.
+            self.resolve_forward_inputs(extend_batch, self.future_map)
+        self.model_worker.stage_mixed_verify_extend(extend_batch)
+        decode_result = self.run_batch(decode_batch)
+        self._apply_war_barrier()
+        self.result_queue.append((decode_batch.copy(), decode_result))
 
     def get_num_allocatable_reqs(
         self,
@@ -5062,7 +5135,7 @@ class Scheduler(
         attr_snapshot = [
             getattr(batch, f.name, None) for f in dataclasses.fields(batch)
         ]
-        self.batch_record_ct = (self.batch_record_ct + 1) % 2
+        self.batch_record_ct = (self.batch_record_ct + 1) % len(self.batch_record_buf)
         retired = self.batch_record_buf[self.batch_record_ct]
         # List (not tuple) so that workers can register additional refs via
         # GenerationBatchResult.extra_keep_alive_refs after forward returns.
