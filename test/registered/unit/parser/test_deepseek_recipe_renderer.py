@@ -281,5 +281,77 @@ class TestDeepSeekRecipe(CustomTestCase):
                 )
 
 
+class TestFastokensPromptEncode(CustomTestCase):
+    """fastokens prompt encoding must reproduce deepseek-recipe's prompt ids."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        try:
+            import fastokens  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("fastokens is not installed")
+        from tokenizers import Tokenizer
+
+        from sglang.srt.environ import envs
+
+        cls.tokenizer = Tokenizer.from_file(_tokenizer_file())
+        cls.recipe = renderer.DeepSeekRecipe("dsv41", cls.tokenizer)
+        with envs.SGLANG_DSV4_FASTOKENS_PROMPT_ENCODE.override(True):
+            cls.fast = renderer.DeepSeekRecipe("dsv41", cls.tokenizer)
+        assert cls.fast._fastokens is not None
+
+    def _bodies(self):
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path": "a.py"}'},
+        }
+        # Special-token spellings inside message text must stay plain text.
+        literal = "see <｜User｜>, <think> and <｜end▁of▁sentence｜> in the log\n"
+        messages = [
+            {"role": "system", "content": "You are a coding agent.\n" * 50},
+            {
+                "role": "user",
+                "content": literal + "def f(x):\n    return x  # 中文\n" * 200,
+            },
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call_1", "content": literal * 30},
+            {"role": "assistant", "content": "Done.  Next:\n\n"},
+            {"role": "user", "content": "   trailing spaces   \n\n"},
+        ]
+        tools = [{"type": "function", "function": {"name": "read_file"}}]
+        for thinking in (True, False):
+            yield {"messages": messages, "tools": tools, "thinking": thinking}
+            yield {
+                "messages": messages[:2],
+                "thinking": thinking,
+                "reasoning_effort": "high",
+            }
+
+    def test_ids_match_recipe(self):
+        for i, body in enumerate(self._bodies()):
+            with self.subTest(i=i):
+                self.assertEqual(self.fast.encode(body), self.recipe.encode(body))
+                for budget in (1, 100):
+                    self.assertEqual(
+                        self.fast.encode(body, effort_budget=budget),
+                        self.recipe.encode(body, effort_budget=budget),
+                    )
+
+    def test_repeat_hits_segment_cache_with_same_ids(self):
+        body = next(self._bodies())
+        first = self.fast.encode(body)
+        longer = {
+            **body,
+            "messages": body["messages"] + [
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "one more turn"},
+            ],
+        }
+        self.assertEqual(self.fast.encode(body), first)
+        self.assertEqual(self.fast.encode(longer), self.recipe.encode(longer))
+
+
 if __name__ == "__main__":
     unittest.main()

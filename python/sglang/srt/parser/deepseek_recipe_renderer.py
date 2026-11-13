@@ -7,8 +7,13 @@ import copy
 import functools
 import json
 import logging
+import time
 from types import ModuleType
 from typing import Any, Optional, Union
+
+from sglang.srt.environ import envs
+
+logger = logging.getLogger(__name__)
 
 DEEPSEEK_RECIPE_INSTALL_HINT = (
     "Serving DeepSeek-V4 / V4.1 requires the `deepseek-recipe` package (DeepSeek's "
@@ -98,6 +103,43 @@ def pre_normalize(body: dict[str, Any]) -> dict[str, Any]:
     return request
 
 
+def _load_fastokens(tokenizer: Any) -> Any:
+    """fastokens copy of the checkpoint tokenizer for prompt encoding, or None."""
+    if not envs.SGLANG_DSV4_FASTOKENS_PROMPT_ENCODE.get():
+        return None
+    try:
+        import fastokens
+    except ImportError:
+        logger.warning(
+            "SGLANG_DSV4_FASTOKENS_PROMPT_ENCODE is set but fastokens is not "
+            "installed; encoding prompts with deepseek-recipe."
+        )
+        return None
+    encoder = fastokens.Tokenizer.from_json_str(tokenizer.to_str())
+    cache_mb = envs.SGLANG_DSV4_FASTOKENS_SEGMENT_CACHE_MB.get()
+    if cache_mb > 0:
+        encoder.enable_segment_cache(cache_mb << 20)
+    logger.info(
+        f"DeepSeek prompts encoded with fastokens (segment cache {cache_mb} MiB)"
+    )
+    return encoder
+
+
+def prompt_segments(rendered: Any) -> list[tuple[str, bool]]:
+    """`rendered.prompt` as (text, is_special) pieces: special tokens only where
+    recipe placed them, so their spellings inside message text stay plain text."""
+    prompt = rendered.prompt
+    segments, pos = [], 0
+    for start, end in rendered.special_ranges:
+        if start > pos:
+            segments.append((prompt[pos:start], False))
+        segments.append((prompt[start:end], True))
+        pos = end
+    if pos < len(prompt):
+        segments.append((prompt[pos:], False))
+    return segments
+
+
 def _error_message(body: Any) -> str:
     try:
         return json.loads(body)["error"]["message"]
@@ -141,6 +183,10 @@ class DeepSeekRecipe:
         self._encoding = encoding.with_special_tokens(
             self.special_tokens
         ).with_tokenizer(self.tokenizer)
+        self._fastokens = _load_fastokens(tokenizer) or self._fast_prompt_tokenizer
+        self._verify_fastokens = (
+            self._fastokens is not None and envs.SGLANG_DSV4_FASTOKENS_VERIFY.get()
+        )
 
     @classmethod
     def from_hf_tokenizer(
@@ -164,9 +210,15 @@ class DeepSeekRecipe:
         """Prompt ids for `body` (see `pre_normalize`); a request recipe rejects
         raises ValueError. `image_urls` receives the images in placeholder order."""
         conversation = self.convert(body, effort_budget=effort_budget)
-        prompt_ids = self.encode_conversation(conversation, effort_budget=effort_budget)
+        rendered = (
+            self._encoding.render_conversation(conversation)
+            if image_urls is not None or self._fastokens is not None
+            else None
+        )
+        prompt_ids = self.encode_conversation(
+            conversation, effort_budget=effort_budget, rendered=rendered
+        )
         if image_urls is not None:
-            rendered = self._encoding.render_conversation(conversation)
             image_urls.extend(
                 source.url or source.data_url for source in rendered.image_sources
             )
@@ -191,28 +243,52 @@ class DeepSeekRecipe:
         return converted.conversation
 
     def encode_conversation(
-        self, conversation: Any, *, effort_budget: Optional[int] = None
+        self,
+        conversation: Any,
+        *,
+        effort_budget: Optional[int] = None,
+        rendered: Any = None,
     ) -> list[int]:
-        """Encode a recipe `Conversation`, including a prefix of its messages."""
-        if self._fast_prompt_tokenizer is None:
-            prompt_ids = self._encoding.encode(conversation)
-        else:
-            rendered = self._encoding.render_conversation(conversation)
-            prompt = rendered.prompt
-            segments = []
-            cursor = 0
-            # Recipe distinguishes control tokens from identical spellings in
-            # user text. Its Python ranges use code-point offsets, not bytes.
-            for start, end in rendered.special_ranges:
-                if start > cursor:
-                    segments.append((prompt[cursor:start], False))
-                segments.append((prompt[start:end], True))
-                cursor = end
-            if cursor < len(prompt):
-                segments.append((prompt[cursor:], False))
-            prompt_ids = self._fast_prompt_tokenizer.encode_segments(segments).ids
+        """Encode a recipe `Conversation`, including a prefix of its messages.
+        `rendered` is its `render_conversation` result when the caller has one."""
+        prompt_ids = self._encode_prompt(conversation, rendered)
         if effort_budget is not None and conversation.thinking_mode:
             prompt_ids = self._replace_effort_budget(prompt_ids, effort_budget)
+        return prompt_ids
+
+    def _encode_prompt(self, conversation: Any, rendered: Any = None) -> list[int]:
+        if self._fastokens is None:
+            return self._encoding.encode(conversation)
+        if rendered is None:
+            rendered = self._encoding.render_conversation(conversation)
+        if rendered.image_sources:
+            return self._encoding.encode(conversation)
+        start = time.perf_counter()
+        segments = prompt_segments(rendered)
+        prompt_ids = self._fastokens.encode_segments(segments).ids
+        if not self._verify_fastokens:
+            return prompt_ids
+        fast_s = time.perf_counter() - start
+        start = time.perf_counter()
+        recipe_ids = self._encoding.encode(conversation)
+        recipe_s = time.perf_counter() - start
+        match = prompt_ids == recipe_ids
+        logger.info(
+            f"DSV4 prompt encode: tokens={len(recipe_ids)} segments={len(segments)} "
+            f"fastokens_ms={fast_s * 1e3:.2f} recipe_ms={recipe_s * 1e3:.2f} "
+            f"match={match}"
+        )
+        if not match:
+            first = next(
+                (i for i, (a, b) in enumerate(zip(prompt_ids, recipe_ids)) if a != b),
+                min(len(prompt_ids), len(recipe_ids)),
+            )
+            logger.warning(
+                f"DSV4 fastokens prompt ids differ from deepseek-recipe at {first} "
+                f"({len(prompt_ids)} vs {len(recipe_ids)} tokens); "
+                "serving recipe's ids."
+            )
+            return recipe_ids
         return prompt_ids
 
     def parse_start(

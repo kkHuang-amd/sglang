@@ -1999,6 +1999,13 @@ class Envs:
     # a deepseek-recipe tier name or an integer budget in [1, 100]; unset ->
     # deepseek-recipe's default.
     SGLANG_DSV41_REASONING_EFFORT = EnvStr(None)
+    # Encode DeepSeek-V4 / V4.1 chat prompts with fastokens: deepseek-recipe renders,
+    # fastokens encodes the text between its special tokens (same ids, multithreaded).
+    SGLANG_DSV4_FASTOKENS_PROMPT_ENCODE = EnvBool(False)
+    # fastokens segment cache for those prompts: agent turns repeat earlier messages.
+    SGLANG_DSV4_FASTOKENS_SEGMENT_CACHE_MB = EnvInt(1024)
+    # Also run deepseek-recipe's encoder, log both timings, serve its ids on a mismatch.
+    SGLANG_DSV4_FASTOKENS_VERIFY = EnvBool(False)
     # Quantize the SWA fp8 KV cache from bf16-rounded values (matches
     # trainer-side QAT and the DSA-CP path) instead of fp32 registers.
     SGLANG_DSV4_USE_BF16_KV_QUANT_SOURCE = EnvBool(False)
