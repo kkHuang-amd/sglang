@@ -1081,6 +1081,13 @@ class Envs:
     # before the gather) to an expert this rank masks off, so the MoE sort drops them
     # instead of piling them (bias-only router logits) onto the same few local experts.
     SGLANG_HIP_DP_MASK_PAD_TOPK = EnvBool(False)
+    # MAX_LEN DP decode combine on HIP: equal-chunk aiter custom reduce-scatter of the
+    # [dp * max_len] MoE output in place of the pynccl reduce_scatterv.
+    SGLANG_HIP_DP_AITER_RS = EnvBool(False)
+    # SGLANG_DP_SHARED_EXPERT_LOCAL on HIP: in captured decode graphs run the local-row shared
+    # expert on the MoE alt stream (SGLANG_ROCM_USE_MULTI_STREAM) across the gather, routed
+    # experts and combine, joined before its add.
+    SGLANG_HIP_DP_SHARED_EXPERT_OVERLAP = EnvBool(False)
     # gfx950 DeepSeek-V4.1 fused mHC boundary: run each sublayer seam (hc_post, the delayed
     # pre-collapse, the mixing stats + sinkhorn, the RMSNorm and its fp8 operand) as one
     # aiter FlyDSL Mega-mHC launch, for row counts up to MAX_ROWS.
