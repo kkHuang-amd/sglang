@@ -821,6 +821,55 @@ def _mask_dp_pad_topk_ids_kernel(
         tl.store(topk_ids_ptr + row * TOPK + offs, -1, mask=offs < TOPK)
 
 
+@triton.jit
+def _mask_zero_rows_topk_ids_kernel(
+    hidden_ptr,
+    topk_ids_ptr,
+    stride_h,
+    fill_id,
+    PREFIX: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    x = tl.load(hidden_ptr + row * stride_h + tl.arange(0, PREFIX)).to(tl.float32)
+    if tl.max(tl.abs(x), axis=0) == 0.0:
+        offs = tl.arange(0, BLOCK)
+        tl.store(topk_ids_ptr + row * TOPK + offs, fill_id, mask=offs < TOPK)
+
+
+def mask_zero_hidden_moe_topk_ids(
+    hidden_states: torch.Tensor, topk_ids: torch.Tensor, fill_id: int
+) -> None:
+    """Route rows whose hidden prefix is all zero to ``fill_id`` in place.
+
+    The HIP MAX_LEN DP gather zero-fills every rank's pad rows before the gather
+    (``dp_gather_replicate_zero_pad`` / ``_mask_dp_pad_rows``), while the decode
+    graph's per-rank counts are the bucket size, so a zero row is the only pad mark
+    that survives replay; a normalized real row is never zero.
+    """
+    rows, topk = topk_ids.shape
+    prefix = 512
+    if (
+        rows == 0
+        or hidden_states.shape[0] != rows
+        or hidden_states.shape[-1] < prefix
+        or hidden_states.stride(-1) != 1
+        or not topk_ids.is_contiguous()
+    ):
+        return
+    _mask_zero_rows_topk_ids_kernel[(rows,)](
+        hidden_states,
+        topk_ids,
+        hidden_states.stride(0),
+        fill_id,
+        PREFIX=prefix,
+        TOPK=topk,
+        BLOCK=triton.next_power_of_2(topk),
+        num_warps=2,
+    )
+
+
 def mask_dp_pad_moe_topk_ids(topk_ids: torch.Tensor) -> None:
     """Set MAX_LEN pad rows' (post-translation, local) topk_ids to -1 in place.
 

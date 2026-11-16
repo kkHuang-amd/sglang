@@ -1077,6 +1077,10 @@ class Envs:
     # aiter all-gather's registered input pool with the pad rows zeroed (one kernel),
     # in place of masked_fill on the rows plus the all-gather's own copy-in.
     SGLANG_HIP_DP_FUSED_PAD_GATHER = EnvBool(False)
+    # MAX_LEN DP gather + aiter MoE runner on HIP: route the gathered pad rows (zero-filled
+    # before the gather) to an expert this rank masks off, so the MoE sort drops them
+    # instead of piling them (bias-only router logits) onto the same few local experts.
+    SGLANG_HIP_DP_MASK_PAD_TOPK = EnvBool(False)
     # gfx950 DeepSeek-V4.1 fused mHC boundary: run each sublayer seam (hc_post, the delayed
     # pre-collapse, the mixing stats + sinkhorn, the RMSNorm and its fp8 operand) as one
     # aiter FlyDSL Mega-mHC launch, for row counts up to MAX_ROWS.
