@@ -233,11 +233,15 @@ def select_dsv4_kv_layout() -> Tuple[KVLayout, Optional[str]]:
         )
         if mode == "auto" and not supported:
             return KVLayout.V4, None
-        if not supported or mode == "v41_new":
+        if not supported:
             raise ValueError(
-                "V4.1 KV layouts on HIP require gfx950 with aiter_sparse attention, "
-                "which reads the block-split v41 layout"
+                "V4.1 KV layouts on HIP require gfx950 with aiter_sparse attention"
             )
+        if mode == "v41_new":
+            # read only by aiter's opus mla_sparse_prefill_v41 (opus_v41_attention_hip)
+            import aiter.ops.mla_sparse_prefill_v41  # noqa: F401
+
+            return KVLayout.V41_NEW, option
         return KVLayout.V41, option
     if mode == "auto" and not is_sm100:
         return KVLayout.V4, None
