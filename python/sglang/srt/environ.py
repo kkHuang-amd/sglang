@@ -1088,6 +1088,10 @@ class Envs:
     # expert on the MoE alt stream (SGLANG_ROCM_USE_MULTI_STREAM) across the gather, routed
     # experts and combine, joined before its add.
     SGLANG_HIP_DP_SHARED_EXPERT_OVERLAP = EnvBool(False)
+    # MAX_LEN DP decode on HIP with SGLANG_DP_SHARED_EXPERT_LOCAL: route and MXFP8-quantize
+    # the local rows before the gather, which then carries [fp8 | e8m0 | topk ids | topk
+    # weights] instead of bf16; aiter fused_moe takes the pre-quantized activations.
+    SGLANG_HIP_DP_ROUTED_MXFP8_GATHER = EnvBool(False)
     # gfx950 DeepSeek-V4.1 fused mHC boundary: run each sublayer seam (hc_post, the delayed
     # pre-collapse, the mixing stats + sinkhorn, the RMSNorm and its fp8 operand) as one
     # aiter FlyDSL Mega-mHC launch, for row counts up to MAX_ROWS.
