@@ -39,6 +39,7 @@ from sglang.srt.utils import get_bool_env_var, is_hip
 
 _is_hip = is_hip()
 SHARED_EXPERT_LOCAL = get_bool_env_var("SGLANG_DP_SHARED_EXPERT_LOCAL")
+_SHARED_LOCAL_OVERLAP = _is_hip and envs.SGLANG_HIP_DP_SHARED_EXPERT_OVERLAP.get()
 
 
 def shared_expert_runs_locally(moe):
@@ -154,15 +155,26 @@ class MoeRowTransport(ComputeTransport):
             and forward_batch.dp_padding_mode.is_max_len()
             and get_parallel().tp_size == get_parallel().attn_dp_size
         )
+        _use_aiter_rs = (
+            _is_hip
+            and envs.SGLANG_HIP_DP_AITER_RS.get()
+            and _use_tp_moe_gather
+            and not _use_reduce_scatterv
+            and forward_batch.dp_padding_mode is not None
+            and forward_batch.dp_padding_mode.is_max_len()
+            and get_parallel().tp_size == get_parallel().attn_dp_size
+        )
         mlp_reduce_scatter = (
             _use_cp
             or _use_reduce_scatterv
             or _use_reduce_scatter
+            or _use_aiter_rs
             or (_use_tp_moe_gather and should_use_dp_reduce_scatterv())
         )
         # A replicated shared expert can run on local rows before the gather;
         # its output is added after returning the routed experts' local slice.
         _shared_local = None
+        self._shared_stream = None
         do_shared_local = _use_tp_moe_gather and shared_expert_runs_locally(moe)
         if _use_cp:
             moe_a2a_backend = get_moe_a2a_backend()
@@ -185,7 +197,22 @@ class MoeRowTransport(ComputeTransport):
                 hidden_states,
             )
             if do_shared_local and local_hidden_states.shape[0] > 0:
-                _shared_local = moe._forward_shared_experts(local_hidden_states)
+                alt = getattr(moe, "alt_stream", None)
+                if (
+                    _SHARED_LOCAL_OVERLAP
+                    and alt is not None
+                    and torch.cuda.is_current_stream_capturing()
+                ):
+                    # Graph-only: the graph pool keeps the shared expert's operands
+                    # alive across the fork; eager would need record_stream.
+                    alt.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(alt):
+                        _shared_local = moe._forward_shared_experts(
+                            local_hidden_states
+                        )
+                    self._shared_stream = alt
+                else:
+                    _shared_local = moe._forward_shared_experts(local_hidden_states)
             # Pad rows are not refreshed during graph replay. Stale bf16-max
             # values can overflow the MoE and contaminate the combine output.
             # self_attn has already reduced across attention TP, so these hidden
@@ -224,6 +251,7 @@ class MoeRowTransport(ComputeTransport):
         self._use_tp_attn_a2a_scatter = _use_tp_attn_a2a_scatter
         self._use_reduce_scatterv = _use_reduce_scatterv
         self._use_reduce_scatter = _use_reduce_scatter
+        self._use_aiter_rs = _use_aiter_rs
         self.mlp_reduce_scatter = mlp_reduce_scatter
         self._shared_local = _shared_local
         self.do_shared_local = do_shared_local
@@ -273,7 +301,13 @@ class MoeRowTransport(ComputeTransport):
                 get_local_dp_buffer(get_parallel().tp_group),
                 hidden_states,
             )
-            if should_use_dp_reduce_scatterv() or _use_reduce_scatterv:
+            if self._use_aiter_rs:
+                # MAX_LEN slots are equal, so the equal-chunk RS returns this rank's slot;
+                # reduce_scatter_tensor takes aiter's custom RS and falls back to RCCL.
+                get_parallel().tp_group.reduce_scatter_tensor(
+                    hidden_states, global_hidden_states.contiguous()
+                )
+            elif should_use_dp_reduce_scatterv() or _use_reduce_scatterv:
                 get_parallel().tp_group.reduce_scatterv(
                     global_hidden_states,
                     output=hidden_states,
@@ -284,6 +318,8 @@ class MoeRowTransport(ComputeTransport):
             else:
                 dp_scatter(hidden_states, global_hidden_states, forward_batch)
             if _shared_local is not None:
+                if self._shared_stream is not None:
+                    torch.cuda.current_stream().wait_stream(self._shared_stream)
                 n = hidden_states.shape[0]
                 hidden_states = hidden_states + _shared_local[:n]
         if _use_tp_attn_a2a_scatter:

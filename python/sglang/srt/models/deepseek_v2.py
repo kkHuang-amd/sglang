@@ -1141,6 +1141,7 @@ class DeepseekV2MoE(nn.Module):
             elif (
                 self.alt_stream is not None
                 and self.num_fused_shared_experts == 0
+                and not skip_shared_experts
                 and hidden_states.shape[0] > 0
                 and get_is_capture_mode()
                 and not is_in_breakable_cuda_graph()
