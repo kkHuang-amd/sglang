@@ -1041,6 +1041,61 @@ def _dp_gather(
         )
 
 
+@triton.jit
+def _copy_rows_zero_pad_kernel(
+    src_ptr,
+    dst_ptr,
+    n_real_ptr,
+    HIDDEN: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < HIDDEN
+    if row < tl.load(n_real_ptr):
+        v = tl.load(src_ptr + row * HIDDEN + offs, mask=mask)
+    else:
+        v = tl.zeros([BLOCK], dtype=dst_ptr.dtype.element_ty)
+    tl.store(dst_ptr + row * HIDDEN + offs, v, mask=mask)
+
+
+def dp_gather_replicate_zero_pad(
+    global_tokens: torch.Tensor,
+    local_tokens: torch.Tensor,
+    forward_batch: ForwardBatch,
+) -> bool:
+    """dp_gather_replicate of MAX_LEN rows whose pad rows (from
+    forward_batch.num_token_non_padded on) go out as zeros, the masking done by the
+    kernel that stages the rows into the aiter all-gather's registered pool. False
+    (nothing gathered) where that path does not apply."""
+    n_real = forward_batch.num_token_non_padded
+    if (
+        not envs.SGLANG_HIP_DP_FUSED_PAD_GATHER.get()
+        or n_real is None
+        or not isinstance(n_real, torch.Tensor)
+        or forward_batch.dp_padding_mode is None
+        or not forward_batch.dp_padding_mode.is_max_len()
+        or get_parallel().attn_cp_size > 1
+        or get_parallel().attn_tp_size != 1
+        or world_dp_gather_enabled()
+        or local_tokens.dim() != 2
+        or local_tokens.shape[0] == 0
+    ):
+        return False
+    hidden = local_tokens.shape[1]
+    block = min(1024, triton.next_power_of_2(hidden))
+
+    def stage(dst: torch.Tensor, src: torch.Tensor) -> None:
+        _copy_rows_zero_pad_kernel[(src.shape[0], triton.cdiv(hidden, block))](
+            src, dst, n_real, HIDDEN=hidden, BLOCK=block
+        )
+
+    _note_dp_gather_in_prefill_graph()
+    return get_parallel().tp_group.aiter_all_gather_staged(
+        global_tokens, local_tokens, stage
+    )
+
+
 def dp_gather_partial(
     global_tokens: torch.Tensor,
     local_tokens: torch.Tensor,
