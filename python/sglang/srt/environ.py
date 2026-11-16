@@ -1077,6 +1077,11 @@ class Envs:
     # aiter all-gather's registered input pool with the pad rows zeroed (one kernel),
     # in place of masked_fill on the rows plus the all-gather's own copy-in.
     SGLANG_HIP_DP_FUSED_PAD_GATHER = EnvBool(False)
+    # gfx950 DeepSeek-V4.1 fused mHC boundary: run each sublayer seam (hc_post, the delayed
+    # pre-collapse, the mixing stats + sinkhorn, the RMSNorm and its fp8 operand) as one
+    # aiter FlyDSL Mega-mHC launch, for row counts up to MAX_ROWS.
+    SGLANG_HIP_DSV41_MEGA_MHC = EnvBool(False)
+    SGLANG_HIP_DSV41_MEGA_MHC_MAX_ROWS = EnvInt(2048)
     # The gfx950 TP4 JIT quick all-reduce (quick_all_reduce_hip) runs an INT4 request below this
     # many MiB in INT8, which is as fast at decode sizes with about 1/16 of INT4's error; 0 runs
     # INT4 at every size.
