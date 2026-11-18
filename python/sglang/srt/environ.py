@@ -1092,6 +1092,9 @@ class Envs:
     # the local rows before the gather, which then carries [fp8 | e8m0 | topk ids | topk
     # weights] instead of bf16; aiter fused_moe takes the pre-quantized activations.
     SGLANG_HIP_DP_ROUTED_MXFP8_GATHER = EnvBool(False)
+    # The same routed MXFP8 gather for SUM_LEN (prefill / extend) steps on the variable-length
+    # gatherv path (SGLANG_DP_USE_GATHERV); replaces SGLANG_ENABLE_DP_GATHER_FP8 for routed MoE layers.
+    SGLANG_HIP_DP_ROUTED_MXFP8_GATHER_PREFILL = EnvBool(False)
     # gfx950 DeepSeek-V4.1 fused mHC boundary: run each sublayer seam (hc_post, the delayed
     # pre-collapse, the mixing stats + sinkhorn, the RMSNorm and its fp8 operand) as one
     # aiter FlyDSL Mega-mHC launch, for row counts up to MAX_ROWS.
