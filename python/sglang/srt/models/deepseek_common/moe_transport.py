@@ -36,6 +36,7 @@ from sglang.srt.layers.moe import (
 )
 from sglang.srt.models.deepseek_common.amd.routed_mxfp8_gather import (
     gather_routed_mxfp8,
+    gather_routed_mxfp8_varlen,
     routed_mxfp8_gather_applies,
 )
 from sglang.srt.runtime_context import get_forward, get_parallel
@@ -224,9 +225,12 @@ class MoeRowTransport(ComputeTransport):
                 hidden_states.shape[0],
                 do_shared_local,
             ):
-                routed = gather_routed_mxfp8(
-                    moe, local_hidden_states, forward_batch, input_ids
+                gather = (
+                    gather_routed_mxfp8
+                    if forward_batch.dp_padding_mode.is_max_len()
+                    else gather_routed_mxfp8_varlen
                 )
+                routed = gather(moe, local_hidden_states, forward_batch, input_ids)
                 hidden_states = routed.hidden_q
                 moe._routed_prequant = routed
             # Pad rows are not refreshed during graph replay. Stale bf16-max
