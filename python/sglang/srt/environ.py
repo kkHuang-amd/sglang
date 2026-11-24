@@ -2159,6 +2159,10 @@ class Envs:
     # kernel (a wave scores several rows of a request on each key tile) instead of the FlyDSL
     # prefill kernel and its schedule; the scale pools are permuted to its layout per layer.
     SGLANG_HIP_FP4_INDEXER_OPUS_PREFILL = EnvBool(False)
+    # gfx950 shared-expert SwiGLU + MXFP8 quant (the native / aiter down_proj operand) on the
+    # FlyDSL flat-chunk kernel instead of Triton, from MIN_M rows; bit-equal output.
+    SGLANG_HIP_SILU_MXFP8_FLYDSL = EnvBool(False)
+    SGLANG_HIP_SILU_MXFP8_FLYDSL_MIN_M = EnvInt(0)
     # Debug: also score each OPUS prefill chunk with the FlyDSL kernel and log the max difference
     # (of the row max) and NaN count inside the rows' windows; the top-k still takes OPUS's logits.
     SGLANG_DEBUG_FP4_INDEXER_OPUS = EnvBool(False)
