@@ -2108,6 +2108,8 @@ class Envs:
     # Scheduler-side staging of shared host-table rows on GPUs without ATS
     # (engram_staging.py); pays off for large prefill batches.
     SGLANG_OPT_DSV41_ENGRAM_HOST_STAGING = EnvBool(False)
+    # Debug: compare every staged engram layer with the table lookup (one sync a layer).
+    SGLANG_DEBUG_ENGRAM_STAGING = EnvBool(False)
     # Deprecated for --engram-config "lookup".
     SGLANG_OPT_DSV41_ENGRAM_PEER_SHARDS = EnvBool(False)
 
