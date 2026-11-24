@@ -2163,6 +2163,10 @@ class Envs:
     # FlyDSL flat-chunk kernel instead of Triton, from MIN_M rows; bit-equal output.
     SGLANG_HIP_SILU_MXFP8_FLYDSL = EnvBool(False)
     SGLANG_HIP_SILU_MXFP8_FLYDSL_MIN_M = EnvInt(0)
+    # V4.1 interleaved aiter_sparse attention, from MIN_TOKENS rows: the query RoPE moves from
+    # the K store launch into the attention's q MXFP8 quant (q read once); bit-equal.
+    SGLANG_HIP_DSV41_Q_ROPE_QUANT = EnvBool(False)
+    SGLANG_HIP_DSV41_Q_ROPE_QUANT_MIN_TOKENS = EnvInt(4096)
     # Debug: also score each OPUS prefill chunk with the FlyDSL kernel and log the max difference
     # (of the row max) and NaN count inside the rows' windows; the top-k still takes OPUS's logits.
     SGLANG_DEBUG_FP4_INDEXER_OPUS = EnvBool(False)
