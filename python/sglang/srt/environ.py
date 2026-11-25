@@ -2167,6 +2167,14 @@ class Envs:
     # the K store launch into the attention's q MXFP8 quant (q read once); bit-equal.
     SGLANG_HIP_DSV41_Q_ROPE_QUANT = EnvBool(False)
     SGLANG_HIP_DSV41_Q_ROPE_QUANT_MIN_TOKENS = EnvInt(4096)
+    # V4.1 prefill indexer paged top-512, from MIN_ROWS rows of at least MIN_WIDTH scores: aiter's
+    # stable one-block radix top-k + a page map instead of top-k v2 (same index set a row, another
+    # order). Narrower planes stay on v2, which is faster there.
+    SGLANG_HIP_DSV41_RADIX_TOPK = EnvBool(False)
+    SGLANG_HIP_DSV41_RADIX_TOPK_MIN_ROWS = EnvInt(2048)
+    SGLANG_HIP_DSV41_RADIX_TOPK_MIN_WIDTH = EnvInt(40960)
+    # Debug: run both top-k paths on every radix call and log rows whose index sets differ.
+    SGLANG_DEBUG_DSV41_RADIX_TOPK = EnvBool(False)
     # Debug: also score each OPUS prefill chunk with the FlyDSL kernel and log the max difference
     # (of the row max) and NaN count inside the rows' windows; the top-k still takes OPUS's logits.
     SGLANG_DEBUG_FP4_INDEXER_OPUS = EnvBool(False)
