@@ -58,6 +58,7 @@ from sglang.kernels.ops.attention.dsv4.opus_sparse_prefill_hip import (
 )
 from sglang.kernels.ops.attention.dsv4.q_rope_quant_hip import rope_q_inplace
 from sglang.kernels.ops.attention.dsv4.swapab_gluon_hip import swapab_attention
+from sglang.kernels.ops.memory.small_field_copy import SmallFieldCopyPlan
 from sglang.kernels.plugin_kernels.amd.spec import StepMetadata
 from sglang.srt.environ import envs
 from sglang.srt.kernel_plugins.amd.binding import is_metadata_unread
@@ -800,6 +801,21 @@ class DSV4Metadata:
             setattr(self, name, getattr(other, name))
 
 
+def _copy_fields(owner, dsts: List[torch.Tensor], srcs: List[torch.Tensor]) -> None:
+    """``dst.copy_(src)`` for every pair; one small_field_copy launch under
+    SGLANG_OPT_DSV41_LEAN_ROUND_COPIES (a plan per destination layout)."""
+    if envs.SGLANG_OPT_DSV41_LEAN_ROUND_COPIES.get():
+        key = tuple((d.data_ptr(), d.shape) for d in dsts)
+        plan = owner.__dict__.get("_field_copy")
+        if plan is None or plan[0] != key:
+            plan = (key, SmallFieldCopyPlan())
+            owner.__dict__["_field_copy"] = plan
+        if plan[1](dsts, srcs):
+            return
+    for d, src in zip(dsts, srcs):
+        d.copy_(src)
+
+
 @dataclass
 class DSV4RawVerifyMetadata:
     req_pool_indices: torch.Tensor
@@ -809,9 +825,11 @@ class DSV4RawVerifyMetadata:
     extend_seq_lens: Optional[torch.Tensor] = None
 
     def copy_(self, other: DSV4RawVerifyMetadata):
-        self.req_pool_indices.copy_(other.req_pool_indices)
-        self.seq_lens.copy_(other.seq_lens)
-        self.out_cache_loc.copy_(other.out_cache_loc)
+        _copy_fields(
+            self,
+            [self.req_pool_indices, self.seq_lens, self.out_cache_loc],
+            [other.req_pool_indices, other.seq_lens, other.out_cache_loc],
+        )
 
         self.extend_seq_lens = other.extend_seq_lens
 
@@ -823,9 +841,11 @@ class DSV4RawDecodeMetadata:
     out_cache_loc: torch.Tensor
 
     def copy_(self, other: DSV4RawDecodeMetadata):
-        self.req_pool_indices.copy_(other.req_pool_indices)
-        self.seq_lens.copy_(other.seq_lens)
-        self.out_cache_loc.copy_(other.out_cache_loc)
+        _copy_fields(
+            self,
+            [self.req_pool_indices, self.seq_lens, self.out_cache_loc],
+            [other.req_pool_indices, other.seq_lens, other.out_cache_loc],
+        )
 
 
 _GROUPED_ASM_BLOCK_Q = 4
@@ -855,9 +875,11 @@ class DSV4RawDSparkDraftMetadata:
 
     def copy_(self, other: DSV4RawDSparkDraftMetadata):
         assert self.block_size == other.block_size
-        self.req_pool_indices.copy_(other.req_pool_indices)
-        self.seq_lens.copy_(other.seq_lens)
-        self.out_cache_loc.copy_(other.out_cache_loc)
+        _copy_fields(
+            self,
+            [self.req_pool_indices, self.seq_lens, self.out_cache_loc],
+            [other.req_pool_indices, other.seq_lens, other.out_cache_loc],
+        )
 
 
 class _GraphBucket(enum.Enum):
